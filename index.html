@@ -134,7 +134,7 @@ function layoutPeople(){
  const width=id=>units[id].length*W+Math.max(0,units[id].length-1)*gap;
  const sizes={},loc={},center={},placed=new Set();
  function measure(id,seen=new Set()){if(seen.has(id))return width(id);seen.add(id);const c=kids[id]||[];return sizes[id]=Math.max(width(id),c.reduce((n,k)=>n+measure(k,new Set(seen)),0)+Math.max(0,c.length-1)*HG)}
- const roots=ids.filter(id=>!anchor[id]);roots.forEach(measure);ids.forEach(id=>{if(!sizes[id])measure(id)});
+ const roots=ids.filter(id=>!anchor[id]);roots.forEach(id=>measure(id));ids.forEach(id=>{if(!sizes[id])measure(id)});
  let cursor=55,maxGen=0;
  function place(id,gen,left){if(placed.has(id))return;placed.add(id);maxGen=Math.max(maxGen,gen);
  const size=sizes[id]||width(id),own=width(id),x=left+(size-own)/2;
