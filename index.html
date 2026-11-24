@@ -119,48 +119,186 @@ function avatar(p){return `<div class="person-avatar">${p.image?`<img src="${esc
 function shortName(p){return esc(p.name)}
 function leafTypeVars(p){const raw=String((p&&p.name)||'').trim();const compact=raw.replace(/\s+/g,'');const len=[...compact].length;let name=32,sub=9; if(len<=4){name=38;sub=10}else if(len<=6){name=35;sub=10}else if(len<=8){name=32;sub=9}else if(len<=10){name=29;sub=9}else if(len<=13){name=26;sub=8}else if(len<=16){name=23;sub=8}else{name=20;sub=7} return `--leaf-name-size:calc(${name}px * var(--tree-text-scale));--leaf-sub-size:calc(${sub}px * var(--tree-text-scale));`;}
 // ----- شجرة تفاعلية قابلة للتكبير والتحريك -----
-
+// Each household is laid out as a compact unit. Parents who share children
+// belong to the same unit even when their recorded ancestry comes from different roots.
 function layoutPeople(){
- const byId=Object.fromEntries(people.map(p=>[p.id,p])),g={};people.forEach(p=>g[p.id]=p.id);
- function root(x){if(!g[x])return null;while(g[x]!==x){g[x]=g[g[x]];x=g[x]}return x}
- function pair(a,b){a=root(a);b=root(b);if(a&&b&&a!==b)g[b]=a}
- for(const p of people){for(const spouse of p.spouse_ids||[])pair(p.id,spouse);if(p.father_id&&p.mother_id)pair(p.father_id,p.mother_id)}
- const units={},unitOf={};for(const p of people){const u=root(p.id);(units[u]??=[]).push(p);unitOf[p.id]=u}
- const ids=Object.keys(units),parents={},children={};for(const id of ids){parents[id]=new Set();children[id]=new Set()}
- for(const p of people){for(const pid of [p.father_id,p.mother_id]){const a=unitOf[pid],b=unitOf[p.id];if(a&&b&&a!==b){parents[b].add(a);children[a].add(b)}}}
- const anchor={};for(const id of ids){const ps=[...parents[id]].sort((a,b)=>children[b].size-children[a].size);if(ps.length)anchor[id]=ps[0]}
- const kids={};for(const id of ids)kids[id]=[];for(const [id,p] of Object.entries(anchor))kids[p].push(id);
- const W=Math.round((treeStyle==='botanical'?286:255)*treeTextScale/1.18),H=Math.round((treeStyle==='botanical'?132:111)*treeTextScale/1.18),HG=Math.round(47*treeTextScale),VG=Math.round((treeStyle==='botanical'?205:176)*treeTextScale/1.27),gap=Math.round(HG*.45);
- const width=id=>units[id].length*W+Math.max(0,units[id].length-1)*gap;
- const sizes={},loc={},center={},placed=new Set();
- function measure(id,seen=new Set()){if(seen.has(id))return width(id);seen.add(id);const c=kids[id]||[];return sizes[id]=Math.max(width(id),c.reduce((n,k)=>n+measure(k,new Set(seen)),0)+Math.max(0,c.length-1)*HG)}
- const roots=ids.filter(id=>!anchor[id]);roots.forEach(id=>measure(id));ids.forEach(id=>{if(!sizes[id])measure(id)});
- let cursor=55,maxGen=0;
- function place(id,gen,left){if(placed.has(id))return;placed.add(id);maxGen=Math.max(maxGen,gen);
- const size=sizes[id]||width(id),own=width(id),x=left+(size-own)/2;
- const ordered=units[id].slice().sort((a,b)=>a.gender==='male'&&b.gender!=='male'?-1:a.gender!=='male'&&b.gender==='male'?1:0);
- ordered.forEach((p,i)=>loc[p.id]={x:x+i*(W+gap),y:55+gen*VG,level:gen});
- center[id]={x:x+own/2,y:55+gen*VG,level:gen};
- const c=kids[id].filter(k=>!placed.has(k)),total=c.reduce((n,k)=>n+(sizes[k]||width(k)),0)+Math.max(0,c.length-1)*HG;let pos=left+(size-total)/2;
- for(const k of c){place(k,gen+1,pos);pos+=(sizes[k]||width(k))+HG}
+ const byId=Object.fromEntries(people.map(p=>[p.id,p]));
+ const famMap={};
+ const spouseFamiliesByPerson={};
+ const parentFamilyOfPerson={};
+ const familyIds=[];
+ function normParents(ids){return [...new Set((ids||[]).filter(id=>id&&byId[id]))].sort()}
+ function ensureFamily(parentIds){
+  const parents=normParents(parentIds);
+  if(!parents.length)return null;
+  const key=parents.join('|');
+  if(!famMap[key]){famMap[key]={id:key,parents:[...parents],children:[]};familyIds.push(key)}
+  return famMap[key];
  }
- for(const id of [...roots,...ids])if(!placed.has(id)){place(id,0,cursor);cursor+=(sizes[id]||width(id))+HG*2}
- if(treeStyle==='botanical'){Object.values(loc).forEach(v=>v.y=55+(maxGen-v.level)*VG);Object.values(center).forEach(v=>v.y=55+(maxGen-v.level)*VG)}
- return {loc,byId,W,H,totalW:Math.max(680,cursor+75),totalH:Math.max(560,maxGen*VG+H+235),roots:roots.map(id=>units[id][0]),units,kids,center,maxGen};
+ // spouse families
+ for(const p of people){
+  for(const sid of p.spouse_ids||[]){
+   if(!byId[sid])continue;
+   ensureFamily([p.id,sid]);
+  }
+ }
+ // parent-child families (including single-parent families when needed)
+ for(const child of people){
+  const parents=[child.father_id,child.mother_id].filter(id=>id&&byId[id]);
+  if(!parents.length)continue;
+  const fam=ensureFamily(parents);
+  if(fam && !fam.children.includes(child.id))fam.children.push(child.id);
+  parentFamilyOfPerson[child.id]=fam.id;
+ }
+ for(const fid of familyIds){
+  const fam=famMap[fid];
+  fam.parents.sort((a,b)=>{
+   const pa=byId[a],pb=byId[b];
+   const ga=pa?.gender||'', gb=pb?.gender||'';
+   if(ga==='male'&&gb!=='male')return -1;
+   if(gb==='male'&&ga!=='male')return 1;
+   return (pa?.name||'').localeCompare(pb?.name||'ar');
+  });
+  for(const pid of fam.parents){(spouseFamiliesByPerson[pid]??=[]).push(fid)}
+ }
+ for(const pid in spouseFamiliesByPerson){
+  spouseFamiliesByPerson[pid].sort((a,b)=>{
+   const fa=famMap[a], fb=famMap[b];
+   return (fb.children.length-fa.children.length)||(fb.parents.length-fa.parents.length)||a.localeCompare(b);
+  });
+ }
+ const primaryFamilyOfPerson={};
+ for(const p of people)primaryFamilyOfPerson[p.id]=(spouseFamiliesByPerson[p.id]||[])[0]||null;
+ // compute generation levels from ancestry
+ const levelMemo={};
+ function levelOf(pid,stack=new Set()){
+  if(!pid||!byId[pid])return 0;
+  if(levelMemo[pid]!=null)return levelMemo[pid];
+  if(stack.has(pid))return 0;
+  stack.add(pid);
+  const p=byId[pid];
+  const parents=[p.father_id,p.mother_id].filter(id=>id&&byId[id]);
+  const lvl=parents.length?Math.max(...parents.map(x=>levelOf(x,new Set(stack))))+1:0;
+  levelMemo[pid]=lvl;
+  return lvl;
+ }
+ for(const p of people)levelOf(p.id);
+ const topY=55;
+ const W=Math.round((treeStyle==='botanical'?286:255)*treeTextScale/1.18);
+ const H=Math.round((treeStyle==='botanical'?132:111)*treeTextScale/1.18);
+ const partnerGap=Math.max(26,Math.round(42*treeTextScale));
+ const siblingGap=Math.max(34,Math.round(56*treeTextScale));
+ const levelGap=Math.round((treeStyle==='botanical'?205:176)*treeTextScale/1.24);
+ function ownWidth(fid){const n=famMap[fid].parents.length||1;return n*W+(n-1)*partnerGap}
+ const displayChildrenByFamily={};
+ for(const fid of familyIds){
+  displayChildrenByFamily[fid]=(famMap[fid].children||[]).sort((a,b)=>{
+   const la=levelMemo[a]||0, lb=levelMemo[b]||0;
+   return la-lb || (byId[a]?.name||'').localeCompare(byId[b]?.name||'ar');
+  }).map(cid=>({personId:cid,familyId:primaryFamilyOfPerson[cid]||null}));
+ }
+ const widths={};
+ function childWidth(item,stack){return item.familyId?measureFamily(item.familyId,stack):W}
+ function measureFamily(fid,stack=new Set()){
+  if(widths[fid]!=null)return widths[fid];
+  if(stack.has(fid))return ownWidth(fid);
+  stack.add(fid);
+  const children=displayChildrenByFamily[fid]||[];
+  const kidsW=children.length?children.reduce((n,it)=>n+childWidth(it,new Set(stack)),0)+Math.max(0,children.length-1)*siblingGap:0;
+  return widths[fid]=Math.max(ownWidth(fid),kidsW);
+ }
+ for(const fid of familyIds)measureFamily(fid);
+ const usedAsNested=new Set();
+ for(const fid of familyIds){for(const item of displayChildrenByFamily[fid]||[]){if(item.familyId && item.familyId!==fid)usedAsNested.add(item.familyId)}}
+ const roots=familyIds.filter(fid=>!usedAsNested.has(fid)).sort((a,b)=>{
+  const ra=Math.min(...famMap[a].parents.map(pid=>levelMemo[pid]||0)), rb=Math.min(...famMap[b].parents.map(pid=>levelMemo[pid]||0));
+  return ra-rb || a.localeCompare(b);
+ });
+ const loc={},familyAnchors={},placedFamilies=new Set();
+ let maxLevel=0,nextX=55;
+ function placeFamily(fid,gen,left){
+  if(placedFamilies.has(fid))return;
+  placedFamilies.add(fid);
+  maxLevel=Math.max(maxLevel,gen);
+  const fam=famMap[fid], total=widths[fid]||ownWidth(fid), own=ownWidth(fid);
+  const startX=left+(total-own)/2;
+  fam.parents.forEach((pid,i)=>{loc[pid]={x:startX+i*(W+partnerGap),y:topY+gen*levelGap,level:gen}});
+  familyAnchors[fid]={x:startX+own/2,y:topY+gen*levelGap,level:gen};
+  const children=displayChildrenByFamily[fid]||[];
+  if(children.length){
+   const sum=children.reduce((n,it)=>n+childWidth(it,new Set([fid])),0)+Math.max(0,children.length-1)*siblingGap;
+   let cur=left+(total-sum)/2;
+   for(const item of children){
+    if(item.familyId && item.familyId!==fid){
+     placeFamily(item.familyId,gen+1,cur);
+     cur+=(widths[item.familyId]||W)+siblingGap;
+    }else{
+     loc[item.personId]={x:cur,y:topY+(gen+1)*levelGap,level:gen+1};
+     maxLevel=Math.max(maxLevel,gen+1);
+     cur+=W+siblingGap;
+    }
+   }
+  }
+ }
+ for(const fid of roots){if(!placedFamilies.has(fid)){placeFamily(fid,Math.min(...famMap[fid].parents.map(pid=>levelMemo[pid]||0)),nextX);nextX+=(widths[fid]||ownWidth(fid))+siblingGap*1.6}}
+ for(const fid of familyIds){if(!placedFamilies.has(fid)){placeFamily(fid,Math.min(...famMap[fid].parents.map(pid=>levelMemo[pid]||0)),nextX);nextX+=(widths[fid]||ownWidth(fid))+siblingGap*1.6}}
+ // standalone people not covered by any family
+ const covered=new Set(Object.keys(loc));
+ const standalone=people.filter(p=>!covered.has(p.id));
+ let standaloneLevel=0;
+ for(const p of standalone){
+  const g=levelMemo[p.id]||0;standaloneLevel=Math.max(standaloneLevel,g);maxLevel=Math.max(maxLevel,g);
+  loc[p.id]={x:nextX,y:topY+g*levelGap,level:g};nextX+=W+siblingGap;
+ }
+ if(treeStyle==='botanical'){
+  for(const z of Object.values(loc))z.y=topY+(maxLevel-z.level)*levelGap;
+  for(const z of Object.values(familyAnchors))z.y=topY+(maxLevel-z.level)*levelGap;
+ }
+ const totalW=Math.max(760,nextX+70,...Object.values(loc).map(z=>z.x+W+60));
+ const totalH=treeStyle==='botanical'?Math.max((maxLevel+1)*levelGap+H+180,560):Math.max((maxLevel+1)*levelGap+H+110,450);
+ return {loc,byId,W,H,totalW,totalH,families:famMap,familyIds,displayChildrenByFamily,familyAnchors,maxLevel,partnerGap,siblingGap,roots};
 }
 function treeEdges(l){
- const edges=[];
- for(const [id,list] of Object.entries(l.units)){const pos=list.map(p=>l.loc[p.id]).sort((a,b)=>a.x-b.x);for(let i=0;i<pos.length-1;i++)edges.push({type:'couple',from:pos[i],to:pos[i+1]})}
- for(const [id,children] of Object.entries(l.kids)){if(children.length&&l.center[id])edges.push({type:'family',from:l.center[id],children:children.map(k=>l.center[k]).filter(Boolean)})}
- return edges;
+ const out=[];
+ for(const fid of l.familyIds){
+  const fam=l.families[fid];
+  if(fam.parents.length>1){
+   const ordered=fam.parents.map(pid=>l.loc[pid]).filter(Boolean).sort((a,b)=>a.x-b.x);
+   for(let i=0;i<ordered.length-1;i++)out.push({type:'couple',from:ordered[i],to:ordered[i+1]});
+  }
+  const children=l.displayChildrenByFamily[fid]||[];
+  if(!children.length)continue;
+  const from=l.familyAnchors[fid]; if(!from)continue;
+  const childAnchors=[];
+  for(const item of children){
+   if(item.familyId && item.familyId!==fid){
+    const f=l.familyAnchors[item.familyId]; if(f)childAnchors.push({x:f.x,y:f.y,level:f.level,family:true});
+   } else {
+    const p=l.loc[item.personId]; if(p)childAnchors.push({x:p.x+l.W/2,y:p.y,level:p.level,family:false});
+   }
+  }
+  if(childAnchors.length)out.push({type:'family',from,children:childAnchors});
+ }
+ return out;
 }
 function edgePath(e,l,bot){
  const H=l.H;
- if(e.type==='couple'){const a=e.from,b=e.to,y=a.y+H*.53;return 'M'+(a.x+l.W*.86)+' '+y+' L'+(b.x+l.W*.14)+' '+y}
- if(e.type==='family'){const y1=bot?e.from.y+H*.12:e.from.y+H*.9;const ends=e.children.map(c=>({x:c.x,y:bot?c.y+H*.88:c.y+H*.12}));const bus=(y1+ends[0].y)/2;let path='M'+e.from.x+' '+y1+' V'+bus;
- if(ends.length===1)return path+' H'+ends[0].x+' V'+ends[0].y;
- const xs=ends.map(c=>c.x);path+=' M'+Math.min(...xs)+' '+bus+' H'+Math.max(...xs);
- for(const c of ends)path+=' M'+c.x+' '+bus+' V'+c.y;return path}
+ if(e.type==='couple'){
+  const a=e.from,b=e.to,y=a.y+H*.53;
+  return `M${a.x+l.W*.86} ${y} L${b.x+l.W*.14} ${y}`;
+ }
+ if(e.type==='family'){
+  const startY=bot?e.from.y+H*.14:e.from.y+H*.9;
+  const ends=e.children.map(c=>({x:c.x,y:bot?c.y+H*.04:c.y+H*.12}));
+  if(!ends.length)return '';
+  const busY=startY+(ends[0].y-startY)*.48;
+  let path=`M${e.from.x} ${startY} V${busY}`;
+  if(ends.length===1)return path+` H${ends[0].x} V${ends[0].y}`;
+  const xs=ends.map(z=>z.x),low=Math.min(...xs),high=Math.max(...xs);
+  path+=` M${low} ${busY} H${high}`;
+  for(const c of ends)path+=` M${c.x} ${busY} V${c.y}`;
+  return path;
+ }
  return '';
 }
 function treeBackgroundSVG(l){
@@ -230,7 +368,7 @@ function svgExport(){
  let name=String(p.name||'').trim(),parts=name.split(/\s+/),lines=[],line='';
  for(const word of parts){if((line+' '+word).trim().length>(bot?19:20)&&line){lines.push(line);line=word}else line=line?line+' '+word:word}if(line)lines.push(line);
  let font;if(bot){const compact=String((p.name||'')).replace(/\s+/g,'');const len=[...compact].length;font=Math.round((len<=4?38:len<=6?35:len<=8?32:len<=10?29:len<=13?26:len<=16?23:20)*treeTextScale)}else font=Math.round(17*treeTextScale);let lineHeight=Math.round(font*1.08),row=lines.slice(0,bot?2:3),firstY=y+h/2-((row.length-1)*lineHeight)/2+font*.28;
- row.forEach((txt,i)=>svg.push(`<text x="${x+w/2}" y="${firstY+i*lineHeight}" font-family="Tahoma,Arial,sans-serif" font-size="${font}" font-weight="bold" fill="#21492d" text-anchor="middle" direction="rtl" unicode-bidi="plaintext">${esc(txt)}</text>`))}
+ row.forEach((txt,i)=>svg.push(`<text x="${x+w/2}" y="${firstY+i*lineHeight}" font-family="Tahoma,Arial,sans-serif" font-size="${font}" font-weight="bold" fill="${p.gender==='female'?'#b14580':'#21492d'}" text-anchor="middle" direction="rtl" unicode-bidi="plaintext">${esc(txt)}</text>`))}
  svg.push('</svg>');download(new Blob([svg.join('')],{type:'image/svg+xml;charset=utf-8'}),'jozorna-'+(bot?'leaves':'lines')+'.svg');
 }
 function setTreeStyle(style){if(!['botanical','classic'].includes(style)||treeStyle===style)return;treeStyle=style;saveVisualPreferences();treeView.fit=false;renderTree()}
