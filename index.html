@@ -123,188 +123,169 @@ function leafTypeVars(p){const raw=String((p&&p.name)||'').trim();const compact=
 // belong to the same unit even when their recorded ancestry comes from different roots.
 function layoutPeople(){
  const byId=Object.fromEntries(people.map(p=>[p.id,p]));
- const famMap={};
- const spouseFamiliesByPerson={};
- const parentFamilyOfPerson={};
- const familyIds=[];
- function normParents(ids){return [...new Set((ids||[]).filter(id=>id&&byId[id]))].sort()}
- function ensureFamily(parentIds){
-  const parents=normParents(parentIds);
-  if(!parents.length)return null;
-  const key=parents.join('|');
-  if(!famMap[key]){famMap[key]={id:key,parents:[...parents],children:[]};familyIds.push(key)}
-  return famMap[key];
- }
- // spouse families
+ const ids=people.map(p=>p.id),parentById={};
+ for(const p of people)parentById[p.id]=[p.father_id,p.mother_id].filter(id=>id&&byId[id]&&id!==p.id);
+ // Marriage groups represent one physical location per individual. A link
+ // inferred from common children counts as a couple, not a sibling relation.
+ const spouseLinks=new Map();
+ function couple(a,b){if(!a||!b||a===b||!byId[a]||!byId[b])return;let pair=[a,b].sort();spouseLinks.set(pair.join('|'),pair)}
+ for(const p of people){for(const id of p.spouse_ids||[])couple(p.id,id)}
+ for(const p of people)if(p.father_id&&p.mother_id)couple(p.father_id,p.mother_id);
+ const uf=Object.fromEntries(ids.map(id=>[id,id]));
+ function find(a){if(!uf[a])return null;while(uf[a]!==a){uf[a]=uf[uf[a]];a=uf[a]}return a}
+ function union(a,b){a=find(a);b=find(b);if(a&&b&&a!==b)uf[b]=a}
+ for(const [a,b] of spouseLinks.values())union(a,b);
+ const units={},unitOf={};
+ for(const p of people){let u=find(p.id);(units[u]??=[]).push(p);unitOf[p.id]=u}
+ const unitIds=Object.keys(units);
+ const parentUnits={},parentsOfUnit={};
+ for(const uid of unitIds){parentUnits[uid]=new Map();parentsOfUnit[uid]=new Set()}
  for(const p of people){
-  for(const sid of p.spouse_ids||[]){
-   if(!byId[sid])continue;
-   ensureFamily([p.id,sid]);
+  const uid=unitOf[p.id];for(const pid of parentById[p.id]){
+   const parentUnit=unitOf[pid];if(parentUnit===uid)continue;
+   parentsOfUnit[uid].add(parentUnit);
+   const group=parentUnits[parentUnit];
+   if(!group.has(uid))group.set(uid,[]);
+   if(!group.get(uid).includes(p.id))group.get(uid).push(p.id);
   }
  }
- // parent-child families (including single-parent families when needed)
- for(const child of people){
-  const parents=[child.father_id,child.mother_id].filter(id=>id&&byId[id]);
-  if(!parents.length)continue;
-  const fam=ensureFamily(parents);
-  if(fam && !fam.children.includes(child.id))fam.children.push(child.id);
-  parentFamilyOfPerson[child.id]=fam.id;
+ const depthMemo={};
+ function depth(id,seen=new Set()){if(!id||!byId[id]||seen.has(id))return 0;if(depthMemo[id]!==undefined)return depthMemo[id];seen.add(id);let pars=parentById[id];return depthMemo[id]=pars.length?Math.max(...pars.map(x=>depth(x,new Set(seen))))+1:0}
+ for(const id of ids)depth(id);
+ // A household inherits its position from one ancestral household. The
+ // strongest candidate is the one with most linked children, then the one
+ // with the largest known ancestral chain. Other ancestry is retained as
+ // a secondary botanical connector, never confused with a marriage.
+ const primary={},otherParents={};
+ for(const uid of unitIds){
+  const candidates=[...parentsOfUnit[uid]].map(pu=>{
+   const targetPeople=units[uid].filter(p=>parentById[p.id].some(id=>unitOf[id]===pu));
+   const ancestorCount=units[pu].reduce((s,p)=>s+parentById[p.id].length,0);
+   const childCount=targetPeople.length;
+   const sourceDepth=Math.max(...units[pu].map(p=>depthMemo[p.id]||0));
+   return {pu,score:childCount*100+ancestorCount*7+sourceDepth*2};
+  }).sort((a,b)=>b.score-a.score||a.pu.localeCompare(b.pu));
+  primary[uid]=candidates[0]?.pu||null;
+  otherParents[uid]=candidates.slice(1).map(x=>x.pu);
  }
- for(const fid of familyIds){
-  const fam=famMap[fid];
-  fam.parents.sort((a,b)=>{
-   const pa=byId[a],pb=byId[b];
-   const ga=pa?.gender||'', gb=pb?.gender||'';
-   if(ga==='male'&&gb!=='male')return -1;
-   if(gb==='male'&&ga!=='male')return 1;
-   return (pa?.name||'').localeCompare(pb?.name||'ar');
-  });
-  for(const pid of fam.parents){(spouseFamiliesByPerson[pid]??=[]).push(fid)}
- }
- for(const pid in spouseFamiliesByPerson){
-  spouseFamiliesByPerson[pid].sort((a,b)=>{
-   const fa=famMap[a], fb=famMap[b];
-   return (fb.children.length-fa.children.length)||(fb.parents.length-fa.parents.length)||a.localeCompare(b);
-  });
- }
- const primaryFamilyOfPerson={};
- for(const p of people)primaryFamilyOfPerson[p.id]=(spouseFamiliesByPerson[p.id]||[])[0]||null;
- // compute generation levels from ancestry
- const levelMemo={};
- function levelOf(pid,stack=new Set()){
-  if(!pid||!byId[pid])return 0;
-  if(levelMemo[pid]!=null)return levelMemo[pid];
-  if(stack.has(pid))return 0;
-  stack.add(pid);
-  const p=byId[pid];
-  const parents=[p.father_id,p.mother_id].filter(id=>id&&byId[id]);
-  const lvl=parents.length?Math.max(...parents.map(x=>levelOf(x,new Set(stack))))+1:0;
-  levelMemo[pid]=lvl;
-  return lvl;
- }
- for(const p of people)levelOf(p.id);
- const topY=55;
+ // Break loops caused by accidentally cyclic input instead of hanging.
+ function createsCycle(uid){let seen=new Set([uid]),p=primary[uid];while(p){if(seen.has(p))return true;seen.add(p);p=primary[p]}return false}
+ for(const uid of unitIds)if(createsCycle(uid))primary[uid]=null;
+ const childrenOf={};for(const uid of unitIds)childrenOf[uid]=[];
+ for(const uid of unitIds)if(primary[uid])childrenOf[primary[uid]].push(uid);
  const W=Math.round((treeStyle==='botanical'?286:255)*treeTextScale/1.18);
  const H=Math.round((treeStyle==='botanical'?132:111)*treeTextScale/1.18);
- const partnerGap=Math.max(26,Math.round(42*treeTextScale));
- const siblingGap=Math.max(34,Math.round(56*treeTextScale));
- const levelGap=Math.round((treeStyle==='botanical'?205:176)*treeTextScale/1.24);
- function ownWidth(fid){const n=famMap[fid].parents.length||1;return n*W+(n-1)*partnerGap}
- const displayChildrenByFamily={};
- for(const fid of familyIds){
-  displayChildrenByFamily[fid]=(famMap[fid].children||[]).sort((a,b)=>{
-   const la=levelMemo[a]||0, lb=levelMemo[b]||0;
-   return la-lb || (byId[a]?.name||'').localeCompare(byId[b]?.name||'ar');
-  }).map(cid=>({personId:cid,familyId:primaryFamilyOfPerson[cid]||null}));
+ const marriedGap=Math.max(22,Math.round(44*treeTextScale));
+ const siblingGap=Math.max(48,Math.round(74*treeTextScale));
+ const forestGap=Math.max(110,Math.round(210*treeTextScale));
+ const VG=Math.round((treeStyle==='botanical'?218:188)*treeTextScale/1.23);
+ const sortMembers=uid=>{
+  const list=[...units[uid]];
+  const coupled=new Set();
+  // Keep partners next to one another even if multiple spouses are present.
+  const adjacency={};for(const p of list)adjacency[p.id]=[];
+  for(const [a,b] of spouseLinks.values())if(unitOf[a]===uid&&unitOf[b]===uid){adjacency[a].push(b);adjacency[b].push(a)}
+  const center=list.slice().sort((a,b)=>(adjacency[b.id].length-adjacency[a.id].length)||
+    (parentById[b.id].length-parentById[a.id].length)||a.name.localeCompare(b.name,'ar'))[0];
+  let result=[];
+  function traverse(id){if(coupled.has(id))return;coupled.add(id);result.push(byId[id]);for(const peer of adjacency[id]||[])traverse(peer)}
+  if(center && adjacency[center.id]?.length===2 && list.length===3){
+   const [first,second]=adjacency[center.id];
+   result=[byId[first],byId[center.id],byId[second]];
+   result.forEach(p=>coupled.add(p.id));
+  }else if(center)traverse(center.id);
+  for(const p of list)traverse(p.id);
+  return result;
+ };
+ const memberOrder={};for(const id of unitIds)memberOrder[id]=sortMembers(id);
+ const ownWidth=uid=>memberOrder[uid].length*W+Math.max(0,memberOrder[uid].length-1)*marriedGap;
+ const sizes={};
+ function measure(uid,ancestors=new Set()){
+  if(sizes[uid]!==undefined)return sizes[uid];
+  if(ancestors.has(uid))return ownWidth(uid);
+  ancestors.add(uid);
+  const kids=childrenOf[uid];
+  const kidsWidth=kids.length?kids.reduce((sum,k)=>sum+measure(k,new Set(ancestors)),0)+(kids.length-1)*siblingGap:0;
+  return sizes[uid]=Math.max(ownWidth(uid),kidsWidth);
  }
- const widths={};
- function childWidth(item,stack){return item.familyId?measureFamily(item.familyId,stack):W}
- function measureFamily(fid,stack=new Set()){
-  if(widths[fid]!=null)return widths[fid];
-  if(stack.has(fid))return ownWidth(fid);
-  stack.add(fid);
-  const children=displayChildrenByFamily[fid]||[];
-  const kidsW=children.length?children.reduce((n,it)=>n+childWidth(it,new Set(stack)),0)+Math.max(0,children.length-1)*siblingGap:0;
-  return widths[fid]=Math.max(ownWidth(fid),kidsW);
- }
- for(const fid of familyIds)measureFamily(fid);
- const usedAsNested=new Set();
- for(const fid of familyIds){for(const item of displayChildrenByFamily[fid]||[]){if(item.familyId && item.familyId!==fid)usedAsNested.add(item.familyId)}}
- const roots=familyIds.filter(fid=>!usedAsNested.has(fid)).sort((a,b)=>{
-  const ra=Math.min(...famMap[a].parents.map(pid=>levelMemo[pid]||0)), rb=Math.min(...famMap[b].parents.map(pid=>levelMemo[pid]||0));
-  return ra-rb || a.localeCompare(b);
- });
- const loc={},familyAnchors={},placedFamilies=new Set();
- let maxLevel=0,nextX=55;
- function placeFamily(fid,gen,left){
-  if(placedFamilies.has(fid))return;
-  placedFamilies.add(fid);
-  maxLevel=Math.max(maxLevel,gen);
-  const fam=famMap[fid], total=widths[fid]||ownWidth(fid), own=ownWidth(fid);
-  const startX=left+(total-own)/2;
-  fam.parents.forEach((pid,i)=>{loc[pid]={x:startX+i*(W+partnerGap),y:topY+gen*levelGap,level:gen}});
-  familyAnchors[fid]={x:startX+own/2,y:topY+gen*levelGap,level:gen};
-  const children=displayChildrenByFamily[fid]||[];
-  if(children.length){
-   const sum=children.reduce((n,it)=>n+childWidth(it,new Set([fid])),0)+Math.max(0,children.length-1)*siblingGap;
-   let cur=left+(total-sum)/2;
-   for(const item of children){
-    if(item.familyId && item.familyId!==fid){
-     placeFamily(item.familyId,gen+1,cur);
-     cur+=(widths[item.familyId]||W)+siblingGap;
-    }else{
-     loc[item.personId]={x:cur,y:topY+(gen+1)*levelGap,level:gen+1};
-     maxLevel=Math.max(maxLevel,gen+1);
-     cur+=W+siblingGap;
-    }
-   }
+ for(const id of unitIds)measure(id);
+ const roots=unitIds.filter(uid=>!primary[uid]);
+ const rootSort=(a,b)=>{
+  const ad=Math.min(...units[a].map(p=>depthMemo[p.id]||0));
+  const bd=Math.min(...units[b].map(p=>depthMemo[p.id]||0));
+  return ad-bd||a.localeCompare(b);
+ };
+ roots.sort(rootSort);
+ // Keep an affinal root close to the lineage whose descendant married it.
+ const rootConnections={};for(const id of roots)rootConnections[id]=new Set();
+ const rootOf=uid=>{let guard=new Set(),v=uid;while(primary[v]&&!guard.has(v)){guard.add(v);v=primary[v]}return v};
+ for(const uid of unitIds)for(const alt of otherParents[uid]){let a=rootOf(uid),b=rootOf(alt);if(a!==b&&rootConnections[a]&&rootConnections[b]){rootConnections[a].add(b);rootConnections[b].add(a)}}
+ const ordered=[],visitedRoots=new Set();
+ function walkRoots(r){if(visitedRoots.has(r))return;visitedRoots.add(r);ordered.push(r);for(const other of [...rootConnections[r]].sort())walkRoots(other)}
+ for(const r of roots)walkRoots(r);
+ const loc={},unitCenters={},unitOrigins={},placed=new Set();let maxLevel=0,nextX=75;
+ function place(uid,level,left){
+  if(placed.has(uid))return;placed.add(uid);maxLevel=Math.max(level,maxLevel);
+  const size=sizes[uid],own=ownWidth(uid),start=left+(size-own)/2;
+  memberOrder[uid].forEach((p,i)=>loc[p.id]={x:start+i*(W+marriedGap),y:60+level*VG,level,unit:uid});
+  const center=start+own/2;
+  unitCenters[uid]={x:center,y:60+level*VG,level};
+  unitOrigins[uid]={x:start,y:60+level*VG,width:own};
+  const kids=childrenOf[uid];
+  if(kids.length){const width=kids.reduce((s,k)=>s+sizes[k],0)+(kids.length-1)*siblingGap;
+   let cur=left+(size-width)/2;
+   for(const kid of kids){place(kid,level+1,cur);cur+=sizes[kid]+siblingGap}
   }
  }
- for(const fid of roots){if(!placedFamilies.has(fid)){placeFamily(fid,Math.min(...famMap[fid].parents.map(pid=>levelMemo[pid]||0)),nextX);nextX+=(widths[fid]||ownWidth(fid))+siblingGap*1.6}}
- for(const fid of familyIds){if(!placedFamilies.has(fid)){placeFamily(fid,Math.min(...famMap[fid].parents.map(pid=>levelMemo[pid]||0)),nextX);nextX+=(widths[fid]||ownWidth(fid))+siblingGap*1.6}}
- // standalone people not covered by any family
- const covered=new Set(Object.keys(loc));
- const standalone=people.filter(p=>!covered.has(p.id));
- let standaloneLevel=0;
- for(const p of standalone){
-  const g=levelMemo[p.id]||0;standaloneLevel=Math.max(standaloneLevel,g);maxLevel=Math.max(maxLevel,g);
-  loc[p.id]={x:nextX,y:topY+g*levelGap,level:g};nextX+=W+siblingGap;
- }
+ for(const root of ordered){if(placed.has(root))continue;place(root,0,nextX);nextX+=sizes[root]+forestGap}
+ for(const uid of unitIds)if(!placed.has(uid)){place(uid,0,nextX);nextX+=sizes[uid]+forestGap}
  if(treeStyle==='botanical'){
-  for(const z of Object.values(loc))z.y=topY+(maxLevel-z.level)*levelGap;
-  for(const z of Object.values(familyAnchors))z.y=topY+(maxLevel-z.level)*levelGap;
+  for(const v of Object.values(loc))v.y=60+(maxLevel-v.level)*VG;
+  for(const v of Object.values(unitCenters))v.y=60+(maxLevel-v.level)*VG;
+  for(const v of Object.values(unitOrigins))v.y=60+(maxLevel-(v.y-60)/VG)*VG;
  }
- const totalW=Math.max(760,nextX+70,...Object.values(loc).map(z=>z.x+W+60));
- const totalH=treeStyle==='botanical'?Math.max((maxLevel+1)*levelGap+H+180,560):Math.max((maxLevel+1)*levelGap+H+110,450);
- return {loc,byId,W,H,totalW,totalH,families:famMap,familyIds,displayChildrenByFamily,familyAnchors,maxLevel,partnerGap,siblingGap,roots};
+ const totalW=Math.max(750,nextX+40),totalH=Math.max(560,(maxLevel+1)*VG+H+(treeStyle==='botanical'?190:90));
+ return {byId,loc,unitOf,units,unitIds,memberOrder,unitCenters,unitOrigins,childrenOf,primary,otherParents,spouseLinks:[...spouseLinks.values()],W,H,totalW,totalH,roots,maxLevel,depthMemo};
 }
 function treeEdges(l){
- const out=[];
- for(const fid of l.familyIds){
-  const fam=l.families[fid];
-  if(fam.parents.length>1){
-   const ordered=fam.parents.map(pid=>l.loc[pid]).filter(Boolean).sort((a,b)=>a.x-b.x);
-   for(let i=0;i<ordered.length-1;i++)out.push({type:'couple',from:ordered[i],to:ordered[i+1]});
-  }
-  const children=l.displayChildrenByFamily[fid]||[];
-  if(!children.length)continue;
-  const from=l.familyAnchors[fid]; if(!from)continue;
-  const childAnchors=[];
-  for(const item of children){
-   if(item.familyId && item.familyId!==fid){
-    const f=l.familyAnchors[item.familyId]; if(f)childAnchors.push({x:f.x,y:f.y,level:f.level,family:true});
-   } else {
-    const p=l.loc[item.personId]; if(p)childAnchors.push({x:p.x+l.W/2,y:p.y,level:p.level,family:false});
-   }
-  }
-  if(childAnchors.length)out.push({type:'family',from,children:childAnchors});
+ const edges=[];
+ for(const [a,b] of l.spouseLinks){
+  const x=l.loc[a],y=l.loc[b];if(x&&y)edges.push({type:'couple',from:x,to:y,a,b});
  }
- return out;
+ // Each household is attached exactly once to its primary parent household.
+ for(const uid of l.unitIds){const pu=l.primary[uid];if(!pu)continue;
+  const parents=l.units[pu].filter(p=>l.units[uid].some(child=>[child.father_id,child.mother_id].includes(p.id)));
+  const from=parents.length?parents.map(p=>l.loc[p.id].x+l.W/2).reduce((a,b)=>a+b,0)/parents.length:l.unitCenters[pu].x;
+  const to=l.unitCenters[uid];
+  if(to)edges.push({type:'branch',from:{x:from,y:l.unitCenters[pu].y},to});
+ }
+ // Distinct known ancestry on the other partner is shown as a subtle vine,
+ // never as a dotted spouse line. One person is never duplicated.
+ for(const uid of l.unitIds)for(const alt of l.otherParents[uid]){
+  const source=l.unitCenters[alt],target=l.unitCenters[uid];
+  if(source&&target&&alt!==l.primary[uid])edges.push({type:'secondary',from:source,to:target});
+ }
+ return edges;
 }
 function edgePath(e,l,bot){
  const H=l.H;
  if(e.type==='couple'){
-  const a=e.from,b=e.to,y=a.y+H*.53;
-  return `M${a.x+l.W*.86} ${y} L${b.x+l.W*.14} ${y}`;
+  const left=e.from.x<e.to.x?e.from:e.to,right=e.from.x<e.to.x?e.to:e.from;
+  if(Math.abs(left.y-right.y)>1)return '';
+  const y=left.y+H*.50;
+  return `M${left.x+l.W*.88} ${y} Q${(left.x+right.x+l.W)/2} ${y+4} ${right.x+l.W*.12} ${y}`;
  }
- if(e.type==='family'){
-  const startY=bot?e.from.y+H*.14:e.from.y+H*.9;
-  const ends=e.children.map(c=>({x:c.x,y:bot?c.y+H*.04:c.y+H*.12}));
-  if(!ends.length)return '';
-  const busY=startY+(ends[0].y-startY)*.48;
-  let path=`M${e.from.x} ${startY} V${busY}`;
-  if(ends.length===1)return path+` H${ends[0].x} V${ends[0].y}`;
-  const xs=ends.map(z=>z.x),low=Math.min(...xs),high=Math.max(...xs);
-  path+=` M${low} ${busY} H${high}`;
-  for(const c of ends)path+=` M${c.x} ${busY} V${c.y}`;
-  return path;
- }
- return '';
+ const startX=e.from.x,endX=e.to.x;
+ const startY=bot?e.from.y+H*.10:e.from.y+H*.90;
+ const endY=bot?e.to.y+H*.90:e.to.y+H*.10;
+ const dy=endY-startY;
+ // smooth natural branch, without a rectangular bus or sharp horizontal line
+ return `M${startX} ${startY} C${startX} ${startY+dy*.39} ${endX} ${endY-dy*.40} ${endX} ${endY}`;
 }
 function treeBackgroundSVG(l){
  const bot=treeStyle==='botanical',w=l.totalW,h=l.totalH,edges=treeEdges(l);
  if(!bot){return `<g fill="none" stroke-linecap="round" stroke-linejoin="round">${edges.map(e=>{
- const couple=e.type==='couple';return `<path d="${edgePath(e,l,false)}" stroke="${couple?'#b17d98':'#78a58a'}" stroke-width="${couple?3.5:4.5}" ${couple?'stroke-dasharray="6 5"':''} opacity=".94"/>`;
+ const couple=e.type==='couple',secondary=e.type==='secondary';return `<path d="${edgePath(e,l,false)}" stroke="${couple?'#b17d98':secondary?'#82ab91':'#78a58a'}" stroke-width="${couple?3.5:secondary?2.8:4.5}" ${couple?'stroke-dasharray="6 5"':secondary?'':''} opacity=".94"/>`;
  }).join('')}</g>`}
  const def=`<defs><linearGradient id="skyGradient" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#eff7ec"/><stop offset=".65" stop-color="#f9f7df"/><stop offset="1" stop-color="#efe9cc"/></linearGradient><linearGradient id="trunkGradient" x1="0" x2="1"><stop stop-color="#523a25"/><stop offset=".36" stop-color="#9c7446"/><stop offset=".75" stop-color="#795432"/><stop offset="1" stop-color="#42311f"/></linearGradient><radialGradient id="canopyGradient"><stop stop-color="#91bf5e" stop-opacity=".35"/><stop offset="1" stop-color="#b8d783" stop-opacity=".02"/></radialGradient><linearGradient id="hillsGradient" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#c4d69b" stop-opacity=".6"/><stop offset="1" stop-color="#95b47b" stop-opacity=".75"/></linearGradient></defs>`;
  let layer=`${def}<rect width="${w}" height="${h}" fill="url(#skyGradient)"/><path d="M0 ${h-42}Q${w*.26} ${h-104} ${w*.48} ${h-56}T${w} ${h-50}V${h}H0Z" fill="url(#hillsGradient)"/>`;
@@ -314,20 +295,24 @@ function treeBackgroundSVG(l){
  let x=75+(i*157.37%Math.max(1,w-150)),y=canopyTop+(i*111.17%Math.max(1,canopyBottom-canopyTop));
  let radius=115+(i*23%75);layer+=`<ellipse cx="${x.toFixed(0)}" cy="${y.toFixed(0)}" rx="${radius}" ry="${(radius*.72).toFixed(0)}" fill="url(#canopyGradient)"/>`;
  }
- for(const root of l.roots){let z=l.loc[root.id];if(!z)continue;let x=z.x+l.W/2,top=z.y+l.H*.42,bottom=h-42;
- layer+=`<path d="M${x} ${bottom+8} Q${x-16} ${bottom-55} ${x} ${top}" fill="none" stroke="#523c26" stroke-width="35" stroke-linecap="round" opacity=".21"/>`;
- layer+=`<path d="M${x} ${bottom+8} Q${x-16} ${bottom-45} ${x} ${top}" fill="none" stroke="url(#trunkGradient)" stroke-width="25" stroke-linecap="round"/>`;
- layer+=`<path d="M${x} ${bottom-28}q-43 25 -72 27M${x} ${bottom-30}q42 27 70 29" stroke="#795637" stroke-width="10" stroke-linecap="round" fill="none"/>`;
- layer+=`<path d="M${x+5} ${bottom-35} Q${x-7} ${bottom-82} ${x+4} ${top+15}" stroke="#c29c64" stroke-width="4" fill="none" opacity=".57"/>`;
+ for(const root of l.roots){
+  const z=l.unitCenters[root];if(!z)continue;
+  const x=z.x,top=z.y+l.H*.40,bottom=h-43;
+  layer+=`<path d="M${x} ${bottom+8} C${x-14} ${bottom-70} ${x+12} ${top+55} ${x} ${top}" fill="none" stroke="#483220" stroke-width="35" stroke-linecap="round" opacity=".16"/>`;
+  layer+=`<path d="M${x} ${bottom+8} C${x-14} ${bottom-70} ${x+12} ${top+55} ${x} ${top}" fill="none" stroke="url(#trunkGradient)" stroke-width="24" stroke-linecap="round"/>`;
+  layer+=`<path d="M${x} ${bottom-25} q-44 23 -67 28 M${x} ${bottom-28} q48 26 71 25" stroke="#795637" stroke-width="10" stroke-linecap="round" fill="none"/>`;
+  layer+=`<path d="M${x-5} ${bottom-40} C${x-18} ${bottom-74} ${x-1} ${top+70} ${x} ${top+12}" stroke="#bb9967" stroke-width="3.6" fill="none" opacity=".63"/>`;
  }
  layer+=`<g fill="none" stroke-linecap="round">`;
  for(const e of edges){
   const d=edgePath(e,l,true);
   if(e.type==='couple'){
-   layer+=`<path d="${d}" stroke="#ac708e" stroke-width="5.5" stroke-dasharray="11 8" opacity=".82"/>`;
+   layer+=`<path d="${d}" stroke="#ac708e" stroke-width="5.5" stroke-dasharray="9 7" opacity=".87"/>`;
+  }else if(e.type==='secondary'){
+   layer+=`<path d="${d}" stroke="#806748" stroke-width="5.2" opacity=".82"/>`;
   }else{
-   layer+=`<path d="${d}" stroke="#5b482e" stroke-width="8" opacity=".92"/>`;
-   layer+=`<path d="${d}" stroke="#b09455" stroke-width="2.5" opacity=".77"/>`;
+   layer+=`<path d="${d}" stroke="#583e27" stroke-width="9.5" opacity=".92"/>`;
+   layer+=`<path d="${d}" stroke="#c5a36c" stroke-width="2.7" opacity=".72"/>`;
   }
  }
  layer+='</g>';
@@ -340,7 +325,7 @@ function treeBackgroundSVG(l){
 }
 function renderTree(){
  const content=$('content');
- content.innerHTML=hero()+`<section class="surface"><div class="surface-header"><h3>فروع العائلة</h3><div class="tools"><div class="tree-style-switch" role="group" aria-label="طريقة عرض شجرة العائلة"><button class="${treeStyle==='botanical'?'active':''}" aria-pressed="${treeStyle==='botanical'}" onclick="app.setTreeStyle('botanical')">🌳 شجرة بأوراق</button><button class="${treeStyle==='classic'?'active':''}" aria-pressed="${treeStyle==='classic'}" onclick="app.setTreeStyle('classic')">⑂ خطوط الأنساب</button></div><div class="tree-font-actions" aria-label="تكبير وتصغير الخط"><button title="تصغير الخط" onclick="app.adjustFont(-.15)">A−</button><span>${Math.round(treeTextScale*100)}٪</span><button title="تكبير الخط" onclick="app.adjustFont(.15)">A+</button></div><input class="field search" id="treeSearch" placeholder="🔎 ابحث عن اسم..." value="${esc(treeView.query)}" oninput="app.treeSearch(this.value)"><button class="btn outline small" onclick="app.fitTree()">⛶ إظهار الكل</button><button class="btn outline small" onclick="app.exportSVG()">↧ حفظ صورة SVG</button></div></div><div id="treeArea" class="tree-area ${treeStyle}"><div class="tree-world" id="treeWorld"><svg class="tree-lines" id="treeLines"></svg><div id="treeNodes"></div></div><div class="tree-controls"><button onclick="app.zoom(1.25)" aria-label="تقريب" title="تقريب">+</button><button onclick="app.zoom(.8)" aria-label="إبعاد" title="إبعاد">−</button><button onclick="app.fitTree()" aria-label="إظهار جميع الأفراد" title="إظهار الجميع">⌖</button></div><div class="tree-tip">${treeStyle==='botanical'?'الأجداد عند الجذع · الزوجان متجاوران والأشقاء على فرع مشترك':'بطاقات الأسماء متصلة بخطوط النسب'} · اسحب لاستكشاف الشجرة وكبّر بإصبعين</div></div></section><p class="page-note">${people.some(p=>p.id.startsWith('sample-'))?'ℹ الأسماء الظاهرة أمثلة تجريبية. ابدأ شجرة فارغة من الإدارة عند الانتقال لبيانات عائلتك.':'ℹ اضغط على أي اسم للاطلاع على العلاقات وتعديلها.'}</p>`;
+ content.innerHTML=hero()+`<section class="surface"><div class="surface-header"><h3>فروع العائلة</h3><div class="tools"><div class="tree-style-switch" role="group" aria-label="طريقة عرض شجرة العائلة"><button class="${treeStyle==='botanical'?'active':''}" aria-pressed="${treeStyle==='botanical'}" onclick="app.setTreeStyle('botanical')">🌳 شجرة بأوراق</button><button class="${treeStyle==='classic'?'active':''}" aria-pressed="${treeStyle==='classic'}" onclick="app.setTreeStyle('classic')">⑂ خطوط الأنساب</button></div><div class="tree-font-actions" aria-label="تكبير وتصغير الخط"><button title="تصغير الخط" onclick="app.adjustFont(-.15)">A−</button><span>${Math.round(treeTextScale*100)}٪</span><button title="تكبير الخط" onclick="app.adjustFont(.15)">A+</button></div><input class="field search" id="treeSearch" placeholder="🔎 ابحث عن اسم..." value="${esc(treeView.query)}" oninput="app.treeSearch(this.value)"><button class="btn outline small" onclick="app.fitTree()">⛶ إظهار الكل</button><button class="btn outline small" onclick="app.exportSVG()">↧ حفظ صورة SVG</button></div></div><div id="treeArea" class="tree-area ${treeStyle}"><div class="tree-world" id="treeWorld"><svg class="tree-lines" id="treeLines"></svg><div id="treeNodes"></div></div><div class="tree-controls"><button onclick="app.zoom(1.25)" aria-label="تقريب" title="تقريب">+</button><button onclick="app.zoom(.8)" aria-label="إبعاد" title="إبعاد">−</button><button onclick="app.fitTree()" aria-label="إظهار جميع الأفراد" title="إظهار الجميع">⌖</button></div><div class="tree-tip">${treeStyle==='botanical'?'الجذوع والأغصان للنسب · الوردي المتقطع للزواج · الأغصان البنية للنسب':'بطاقات الأسماء متصلة بخطوط النسب'} · اسحب لاستكشاف الشجرة وكبّر بإصبعين</div></div></section><p class="page-note">${people.some(p=>p.id.startsWith('sample-'))?'ℹ الأسماء الظاهرة أمثلة تجريبية. ابدأ شجرة فارغة من الإدارة عند الانتقال لبيانات عائلتك.':'ℹ اضغط على أي اسم للاطلاع على العلاقات وتعديلها.'}</p>`;
  treeView.layout=layoutPeople();const l=treeView.layout,$nodes=$('treeNodes'),$svg=$('treeLines');
  document.documentElement.style.setProperty('--tree-card-w',l.W+'px');document.documentElement.style.setProperty('--tree-card-h',l.H+'px');
  $nodes.style.width=l.totalW+'px';$nodes.style.height=l.totalH+'px';$svg.setAttribute('width',l.totalW);$svg.setAttribute('height',l.totalH);$svg.setAttribute('viewBox',`0 0 ${l.totalW} ${l.totalH}`);
@@ -354,10 +339,10 @@ function renderTree(){
  area.addEventListener('wheel',e=>{e.preventDefault();let box=area.getBoundingClientRect();zoomTree(e.deltaY<0?1.12:.89,e.clientX-box.left,e.clientY-box.top)},{passive:false});
  let t=0;area.addEventListener('touchstart',e=>{if(e.touches.length===2)t=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY)},{passive:true});
  area.addEventListener('touchmove',e=>{if(e.touches.length===2){let now=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);if(t)zoomTree(now/t,area.clientWidth/2,area.clientHeight/2);t=now}},{passive:true});
- requestAnimationFrame(()=>{if(!treeView.fit){fitTree();if(treeView.scale<.88)zoomTree(.88/treeView.scale);treeView.fit=true}else applyTransform();if(treeView.query)treeSearch(treeView.query)});
+ requestAnimationFrame(()=>{if(!treeView.fit){fitTree();treeView.fit=true}else applyTransform();if(treeView.query)treeSearch(treeView.query)});
 }
 function applyTransform(){const el=$('treeWorld');if(el)el.style.transform=`translate(${treeView.tx}px,${treeView.ty}px) scale(${treeView.scale})`}
-function fitTree(){let a=$('treeArea'),l=treeView.layout;if(!a||!l)return;let scale=Math.min(1.35,Math.max(.08,Math.min((a.clientWidth-28)/l.totalW,(a.clientHeight-32)/l.totalH)));treeView.scale=scale;treeView.tx=(a.clientWidth-l.totalW*scale)/2;treeView.ty=Math.max(8,(a.clientHeight-l.totalH*scale)/2);applyTransform()}
+function fitTree(){let a=$('treeArea'),l=treeView.layout;if(!a||!l)return;let scale=Math.min(1.35,Math.max(.015,Math.min((a.clientWidth-28)/l.totalW,(a.clientHeight-32)/l.totalH)));treeView.scale=scale;treeView.tx=(a.clientWidth-l.totalW*scale)/2;treeView.ty=Math.max(8,(a.clientHeight-l.totalH*scale)/2);applyTransform()}
 function zoomTree(factor,cx,cy){let a=$('treeArea');if(!a)return;cx??=a.clientWidth/2;cy??=a.clientHeight/2;let next=Math.max(.08,Math.min(3.8,treeView.scale*factor)),ratio=next/treeView.scale;treeView.tx=cx-(cx-treeView.tx)*ratio;treeView.ty=cy-(cy-treeView.ty)*ratio;treeView.scale=next;applyTransform()}
 function treeSearch(q){treeView.query=q;document.querySelectorAll('.tree-node').forEach(el=>{let p=people.find(x=>x.id===el.dataset.id);el.classList.toggle('match',!!q&&!!p&&p.name.includes(q))});if(q.trim().length>1){let p=people.find(x=>x.name.includes(q.trim()));if(p&&treeView.layout?.loc[p.id]){const a=$('treeArea'),pos=treeView.layout.loc[p.id],l=treeView.layout;treeView.scale=Math.max(.82,treeView.scale);treeView.tx=a.clientWidth/2-(pos.x+l.W/2)*treeView.scale;treeView.ty=a.clientHeight/2-(pos.y+l.H/2)*treeView.scale;applyTransform()}}}
 function svgExport(){
