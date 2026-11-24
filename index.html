@@ -150,17 +150,63 @@ function layoutPeople(){
  const totalH=treeStyle==='botanical'?Math.max((maxGen)*VG+H+235,560):Math.max((maxGen)*VG+H+100,450);
  return {loc,byId,W,H,totalW,totalH,children,attachments,roots,maxGen};
 }
-function treeEdges(l){const edges=[];
- for(const p of people){const pid=principalParent(p,l.byId),a=l.loc[pid],b=l.loc[p.id];if(!a||!b)continue;edges.push({from:a,to:b,type:'child'})}
- for(const [id,partners] of Object.entries(l.attachments)){const a=l.loc[id];if(a)for(const mate of partners){const b=l.loc[mate];if(b)edges.push({from:a,to:b,type:'spouse'})}}
+// كل صلة نسب تُرسم من الوالدين، حتى إذا جاء كل منهما من جذر مستقل.
+// يستفاد من أسماء الوالدين المسجلة، ولا تُخترع أي علاقات جديدة.
+function treeEdges(l){
+ const edges=[],seenCouples=new Set();
+ for(const child of people){
+  const target=l.loc[child.id];if(!target)continue;
+  for(const parentId of [child.father_id,child.mother_id]){
+   const from=l.loc[parentId];if(from&&parentId!==child.id){
+    edges.push({from,to:target,type:'child',parentId,childId:child.id});
+   }
+  }
+ }
+ function couple(aId,bId){
+  if(!aId||!bId||aId===bId||!l.loc[aId]||!l.loc[bId])return;
+  const key=[String(aId),String(bId)].sort().join('|');
+  if(seenCouples.has(key))return;seenCouples.add(key);
+  edges.push({from:l.loc[aId],to:l.loc[bId],type:'spouse',parentId:aId,childId:bId});
+ }
+ for(const p of people){
+  for(const spouseId of p.spouse_ids||[])couple(p.id,spouseId);
+  // الأب والأم اللذان يشتركان في طفل يظهر بينهما رابط الأسرة
+  // حتى إن لم تُسجّل علاقة الزواج من بطاقتيهما.
+  if(p.father_id&&p.mother_id)couple(p.father_id,p.mother_id);
+ }
  return edges;
+}
+function edgePath(e,l,bot){
+ const a=e.from,b=e.to,W=l.W,H=l.H;
+ const ax=a.x+W/2,bx=b.x+W/2;
+ if(e.type==='spouse'){
+  // اتصال مباشر بالزوجين حتى إن كان كل منهما في فرع مختلف.
+  const right=a.x<=b.x?a:b,left=a.x<=b.x?b:a;
+  const x1=right.x+W*.88,x2=left.x+W*.12;
+  const y1=right.y+H*.5,y2=left.y+H*.5;
+  if(Math.abs(y1-y2)<H*.75){const sag=Math.min(90,Math.max(22,Math.abs(x2-x1)*.055));
+   return `M${x1} ${y1} C${x1+(x2-x1)*.25} ${y1-sag} ${x2-(x2-x1)*.25} ${y2-sag} ${x2} ${y2}`;
+  }
+  // اختلاف الأجيال لا يمنع رسم خط الزواج
+  const midY=(y1+y2)/2;
+  return `M${x1} ${y1} C${x1+(x2-x1)*.3} ${midY} ${x2-(x2-x1)*.3} ${midY} ${x2} ${y2}`;
+ }
+ // في العرض الطبيعي الأجداد أسفل الشجرة؛ وفي عرض الخطوط الأجداد فوق.
+ const x1=ax,y1=bot?a.y+H*.16:a.y+H*.84;
+ const x2=bx,y2=bot?b.y+H*.84:b.y+H*.16;
+ const dy=y2-y1;
+ if(Math.abs(dy)<H*.6){
+  // الصلات العابرة للفروع توصل من حافة الورقة لتجنب مرور الخط على الاسم.
+  const leftToRight=x2>x1,sx=a.x+(leftToRight?W*.88:W*.12),tx=b.x+(leftToRight?W*.12:W*.88);
+  return `M${sx} ${a.y+H*.56} C${(sx+tx)/2} ${a.y+H*.56} ${(sx+tx)/2} ${b.y+H*.56} ${tx} ${b.y+H*.56}`;
+ }
+ return `M${x1} ${y1} C${x1} ${y1+dy*.43} ${x2} ${y2-dy*.43} ${x2} ${y2}`;
 }
 function treeBackgroundSVG(l){
  const bot=treeStyle==='botanical',w=l.totalW,h=l.totalH,edges=treeEdges(l);
  if(!bot){return `<g fill="none" stroke-linecap="round" stroke-linejoin="round">${edges.map(e=>{
- let a=e.from,b=e.to;if(e.type==='spouse')return `<path d="M${a.x+l.W} ${a.y+l.H/2}H${b.x}" stroke="#bba477" stroke-width="4" stroke-dasharray="8 9"/>`;
- let x1=a.x+l.W/2,y1=a.y+l.H,x2=b.x+l.W/2,y2=b.y,mid=(y1+y2)/2;
- return `<path d="M${x1} ${y1}V${mid}H${x2}V${y2}" stroke="#78a58a" stroke-width="4.5"/>`}).join('')}</g>`}
+ const spouse=e.type==='spouse';return `<path d="${edgePath(e,l,false)}" stroke="${spouse?'#a57891':'#78a58a'}" stroke-width="${spouse?4:4.5}" ${spouse?'stroke-dasharray="10 7"':''} opacity=".94"/>`;
+ }).join('')}</g>`}
  const def=`<defs><linearGradient id="skyGradient" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#eff7ec"/><stop offset=".65" stop-color="#f9f7df"/><stop offset="1" stop-color="#efe9cc"/></linearGradient><linearGradient id="trunkGradient" x1="0" x2="1"><stop stop-color="#523a25"/><stop offset=".36" stop-color="#9c7446"/><stop offset=".75" stop-color="#795432"/><stop offset="1" stop-color="#42311f"/></linearGradient><radialGradient id="canopyGradient"><stop stop-color="#91bf5e" stop-opacity=".35"/><stop offset="1" stop-color="#b8d783" stop-opacity=".02"/></radialGradient><linearGradient id="hillsGradient" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#c4d69b" stop-opacity=".6"/><stop offset="1" stop-color="#95b47b" stop-opacity=".75"/></linearGradient></defs>`;
  let layer=`${def}<rect width="${w}" height="${h}" fill="url(#skyGradient)"/><path d="M0 ${h-42}Q${w*.26} ${h-104} ${w*.48} ${h-56}T${w} ${h-50}V${h}H0Z" fill="url(#hillsGradient)"/>`;
  // ظلال التاج فوق الجذع، وتظل البطاقات مقروءة فوقها.
@@ -176,11 +222,14 @@ function treeBackgroundSVG(l){
  layer+=`<path d="M${x+5} ${bottom-35} Q${x-7} ${bottom-82} ${x+4} ${top+15}" stroke="#c29c64" stroke-width="4" fill="none" opacity=".57"/>`;
  }
  layer+=`<g fill="none" stroke-linecap="round">`;
- for(const e of edges){let a=e.from,b=e.to;if(e.type==='spouse'){
- const y=a.y+l.H*.57;layer+=`<path d="M${a.x+l.W*.87} ${y} Q${(a.x+b.x+l.W)/2} ${y-24} ${b.x+l.W*.13} ${b.y+l.H*.58}" stroke="#8b724e" stroke-width="5" stroke-dasharray="3 9" opacity=".7"/>`;continue;}
- const x1=a.x+l.W/2,y1=a.y+12,x2=b.x+l.W/2,y2=b.y+l.H-10,dy=y1-y2;
- layer+=`<path d="M${x1} ${y1} C${x1} ${y1-dy*.38} ${x2} ${y2+dy*.43} ${x2} ${y2}" stroke="#5b482e" stroke-width="9"/>`;
- layer+=`<path d="M${x1} ${y1} C${x1} ${y1-dy*.38} ${x2} ${y2+dy*.43} ${x2} ${y2}" stroke="#b09455" stroke-width="2.5" opacity=".72"/>`;
+ for(const e of edges){
+  const d=edgePath(e,l,true);
+  if(e.type==='spouse'){
+   layer+=`<path d="${d}" stroke="#ac708e" stroke-width="5.5" stroke-dasharray="11 8" opacity=".82"/>`;
+  }else{
+   layer+=`<path d="${d}" stroke="#5b482e" stroke-width="8" opacity=".92"/>`;
+   layer+=`<path d="${d}" stroke="#b09455" stroke-width="2.5" opacity=".77"/>`;
+  }
  }
  layer+='</g>';
  // تفاصيل أوراق صغيرة على الأغصان، لا تستبدل أسماء أفراد العائلة.
@@ -192,7 +241,7 @@ function treeBackgroundSVG(l){
 }
 function renderTree(){
  const content=$('content');
- content.innerHTML=hero()+`<section class="surface"><div class="surface-header"><h3>فروع العائلة</h3><div class="tools"><div class="tree-style-switch" role="group" aria-label="طريقة عرض شجرة العائلة"><button class="${treeStyle==='botanical'?'active':''}" aria-pressed="${treeStyle==='botanical'}" onclick="app.setTreeStyle('botanical')">🌳 شجرة بأوراق</button><button class="${treeStyle==='classic'?'active':''}" aria-pressed="${treeStyle==='classic'}" onclick="app.setTreeStyle('classic')">⑂ خطوط الأنساب</button></div><div class="tree-font-actions" aria-label="تكبير وتصغير الخط"><button title="تصغير الخط" onclick="app.adjustFont(-.15)">A−</button><span>${Math.round(treeTextScale*100)}٪</span><button title="تكبير الخط" onclick="app.adjustFont(.15)">A+</button></div><input class="field search" id="treeSearch" placeholder="🔎 ابحث عن اسم..." value="${esc(treeView.query)}" oninput="app.treeSearch(this.value)"><button class="btn outline small" onclick="app.fitTree()">⛶ إظهار الكل</button><button class="btn outline small" onclick="app.exportSVG()">↧ حفظ صورة SVG</button></div></div><div id="treeArea" class="tree-area ${treeStyle}"><div class="tree-world" id="treeWorld"><svg class="tree-lines" id="treeLines"></svg><div id="treeNodes"></div></div><div class="tree-controls"><button onclick="app.zoom(1.25)" aria-label="تقريب" title="تقريب">+</button><button onclick="app.zoom(.8)" aria-label="إبعاد" title="إبعاد">−</button><button onclick="app.fitTree()" aria-label="إظهار جميع الأفراد" title="إظهار الجميع">⌖</button></div><div class="tree-tip">${treeStyle==='botanical'?'الأجداد عند الجذع والفروع للأبناء · الأسماء على الأوراق':'بطاقات الأسماء متصلة بخطوط النسب'} · اسحب لاستكشاف الشجرة وكبّر بإصبعين</div></div></section><p class="page-note">${people.some(p=>p.id.startsWith('sample-'))?'ℹ الأسماء الظاهرة أمثلة تجريبية. ابدأ شجرة فارغة من الإدارة عند الانتقال لبيانات عائلتك.':'ℹ اضغط على أي اسم للاطلاع على العلاقات وتعديلها.'}</p>`;
+ content.innerHTML=hero()+`<section class="surface"><div class="surface-header"><h3>فروع العائلة</h3><div class="tools"><div class="tree-style-switch" role="group" aria-label="طريقة عرض شجرة العائلة"><button class="${treeStyle==='botanical'?'active':''}" aria-pressed="${treeStyle==='botanical'}" onclick="app.setTreeStyle('botanical')">🌳 شجرة بأوراق</button><button class="${treeStyle==='classic'?'active':''}" aria-pressed="${treeStyle==='classic'}" onclick="app.setTreeStyle('classic')">⑂ خطوط الأنساب</button></div><div class="tree-font-actions" aria-label="تكبير وتصغير الخط"><button title="تصغير الخط" onclick="app.adjustFont(-.15)">A−</button><span>${Math.round(treeTextScale*100)}٪</span><button title="تكبير الخط" onclick="app.adjustFont(.15)">A+</button></div><input class="field search" id="treeSearch" placeholder="🔎 ابحث عن اسم..." value="${esc(treeView.query)}" oninput="app.treeSearch(this.value)"><button class="btn outline small" onclick="app.fitTree()">⛶ إظهار الكل</button><button class="btn outline small" onclick="app.exportSVG()">↧ حفظ صورة SVG</button></div></div><div id="treeArea" class="tree-area ${treeStyle}"><div class="tree-world" id="treeWorld"><svg class="tree-lines" id="treeLines"></svg><div id="treeNodes"></div></div><div class="tree-controls"><button onclick="app.zoom(1.25)" aria-label="تقريب" title="تقريب">+</button><button onclick="app.zoom(.8)" aria-label="إبعاد" title="إبعاد">−</button><button onclick="app.fitTree()" aria-label="إظهار جميع الأفراد" title="إظهار الجميع">⌖</button></div><div class="tree-tip">${treeStyle==='botanical'?'الأجداد عند الجذع · خطوط الأب والأم والزواج بين جميع الفروع':'بطاقات الأسماء متصلة بخطوط النسب'} · اسحب لاستكشاف الشجرة وكبّر بإصبعين</div></div></section><p class="page-note">${people.some(p=>p.id.startsWith('sample-'))?'ℹ الأسماء الظاهرة أمثلة تجريبية. ابدأ شجرة فارغة من الإدارة عند الانتقال لبيانات عائلتك.':'ℹ اضغط على أي اسم للاطلاع على العلاقات وتعديلها.'}</p>`;
  treeView.layout=layoutPeople();const l=treeView.layout,$nodes=$('treeNodes'),$svg=$('treeLines');
  document.documentElement.style.setProperty('--tree-card-w',l.W+'px');document.documentElement.style.setProperty('--tree-card-h',l.H+'px');
  $nodes.style.width=l.totalW+'px';$nodes.style.height=l.totalH+'px';$svg.setAttribute('width',l.totalW);$svg.setAttribute('height',l.totalH);$svg.setAttribute('viewBox',`0 0 ${l.totalW} ${l.totalH}`);
