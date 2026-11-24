@@ -118,6 +118,9 @@ function hero(){let c=counts();return `<section class="hero"><div><h2>${esc(fami
 function avatar(p){return `<div class="person-avatar">${p.image?`<img src="${esc(p.image)}" alt="">`:esc((p.name||'؟').trim().split(/\s+/).map(w=>w[0]).slice(0,2).join(''))}</div>`}
 function shortName(p){return esc(p.name)}
 function leafTypeVars(p){const raw=String((p&&p.name)||'').trim();const compact=raw.replace(/\s+/g,'');const len=[...compact].length;let name=32,sub=9; if(len<=4){name=38;sub=10}else if(len<=6){name=35;sub=10}else if(len<=8){name=32;sub=9}else if(len<=10){name=29;sub=9}else if(len<=13){name=26;sub=8}else if(len<=16){name=23;sub=8}else{name=20;sub=7} return `--leaf-name-size:calc(${name}px * var(--tree-text-scale));--leaf-sub-size:calc(${sub}px * var(--tree-text-scale));`;}
+// Reject contradictory parent–child marriage links in the data model and renderer.
+function isParentChildPair(a,b){if(!a||!b)return false;return a.father_id===b.id||a.mother_id===b.id||b.father_id===a.id||b.mother_id===a.id}
+function invalidCoupleLinks(list=people){const lookup=Object.fromEntries(list.map(p=>[p.id,p]));const errors=[];const seen=new Set();for(const p of list){for(const sid of p.spouse_ids||[]){const q=lookup[sid];const key=[p.id,sid].sort().join('|');if(!seen.has(key)&&q&&isParentChildPair(p,q)){seen.add(key);errors.push({a:p,b:q})}}}return errors}
 // ----- شجرة تفاعلية قابلة للتكبير والتحريك -----
 // Each household is laid out as a compact unit. Parents who share children
 // belong to the same unit even when their recorded ancestry comes from different roots.
@@ -128,7 +131,7 @@ function layoutPeople(){
  // Marriage groups represent one physical location per individual. A link
  // inferred from common children counts as a couple, not a sibling relation.
  const spouseLinks=new Map();
- function couple(a,b){if(!a||!b||a===b||!byId[a]||!byId[b])return;let pair=[a,b].sort();spouseLinks.set(pair.join('|'),pair)}
+ function couple(a,b){if(!a||!b||a===b||!byId[a]||!byId[b]||isParentChildPair(byId[a],byId[b]))return;let pair=[a,b].sort();spouseLinks.set(pair.join('|'),pair)}
  for(const p of people){for(const id of p.spouse_ids||[])couple(p.id,id)}
  for(const p of people)if(p.father_id&&p.mother_id)couple(p.father_id,p.mother_id);
  const uf=Object.fromEntries(ids.map(id=>[id,id]));
@@ -244,7 +247,33 @@ function layoutPeople(){
   for(const v of Object.values(unitCenters))v.y=60+(maxLevel-v.level)*VG;
   for(const v of Object.values(unitOrigins))v.y=60+(maxLevel-(v.y-60)/VG)*VG;
  }
- const totalW=Math.max(750,nextX+40),totalH=Math.max(560,(maxLevel+1)*VG+H+(treeStyle==='botanical'?190:90));
+ // Position independent ancestral roots near their biological child rather
+ // than leaving a long vine crossing unrelated households.
+ const usedSatellites=new Set();
+ for(const targetUid of unitIds){
+  for(const altUid of otherParents[targetUid]){
+   if(usedSatellites.has(altUid) || !roots.includes(altUid))continue;
+   if(units[altUid].length!==1 || childrenOf[altUid].length)continue;
+   const parent=units[altUid][0];
+   const child=units[targetUid].find(c=>[c.father_id,c.mother_id].includes(parent.id));
+   if(!child||!loc[child.id]||!loc[parent.id])continue;
+   const point=loc[child.id],base=loc[parent.id];
+   const generationY=base.y;
+   const candidates=[];
+   for(let d=1;d<=6;d++){
+    candidates.push(point.x-(W+marriedGap)*d);
+    candidates.push(point.x+(W+marriedGap)*d);
+   }
+   function isFree(x){if(x<55)return false;return Object.entries(loc).every(([id,z])=>id===parent.id || Math.abs(z.y-generationY)>H*.78 || z.x+W+30<=x || x+W+30<=z.x)}
+   let choice=candidates.find(isFree);
+   if(choice==null)continue;
+   base.x=choice;
+   unitCenters[altUid].x=choice+W/2;
+   unitOrigins[altUid].x=choice;
+   usedSatellites.add(altUid);
+  }
+ }
+ const totalW=Math.max(750,nextX+40,...Object.values(loc).map(z=>z.x+W+65)),totalH=Math.max(560,(maxLevel+1)*VG+H+(treeStyle==='botanical'?190:90));
  return {byId,loc,unitOf,units,unitIds,memberOrder,unitCenters,unitOrigins,childrenOf,primary,otherParents,spouseLinks:[...spouseLinks.values()],W,H,totalW,totalH,roots,maxLevel,depthMemo};
 }
 function treeEdges(l){
@@ -262,8 +291,10 @@ function treeEdges(l){
  // Distinct known ancestry on the other partner is shown as a subtle vine,
  // never as a dotted spouse line. One person is never duplicated.
  for(const uid of l.unitIds)for(const alt of l.otherParents[uid]){
-  const source=l.unitCenters[alt],target=l.unitCenters[uid];
-  if(source&&target&&alt!==l.primary[uid])edges.push({type:'secondary',from:source,to:target});
+  const linked=l.units[uid].find(c=>l.units[alt].some(p=>[c.father_id,c.mother_id].includes(p.id)));
+  const biologicalParent=linked&&l.units[alt].find(p=>[linked.father_id,linked.mother_id].includes(p.id));
+  const source=biologicalParent&&l.loc[biologicalParent.id],target=linked&&l.loc[linked.id];
+  if(source&&target&&alt!==l.primary[uid])edges.push({type:'secondary',from:{x:source.x+l.W/2,y:source.y},to:{x:target.x+l.W/2,y:target.y}});
  }
  return edges;
 }
@@ -325,7 +356,9 @@ function treeBackgroundSVG(l){
 }
 function renderTree(){
  const content=$('content');
- content.innerHTML=hero()+`<section class="surface"><div class="surface-header"><h3>فروع العائلة</h3><div class="tools"><div class="tree-style-switch" role="group" aria-label="طريقة عرض شجرة العائلة"><button class="${treeStyle==='botanical'?'active':''}" aria-pressed="${treeStyle==='botanical'}" onclick="app.setTreeStyle('botanical')">🌳 شجرة بأوراق</button><button class="${treeStyle==='classic'?'active':''}" aria-pressed="${treeStyle==='classic'}" onclick="app.setTreeStyle('classic')">⑂ خطوط الأنساب</button></div><div class="tree-font-actions" aria-label="تكبير وتصغير الخط"><button title="تصغير الخط" onclick="app.adjustFont(-.15)">A−</button><span>${Math.round(treeTextScale*100)}٪</span><button title="تكبير الخط" onclick="app.adjustFont(.15)">A+</button></div><input class="field search" id="treeSearch" placeholder="🔎 ابحث عن اسم..." value="${esc(treeView.query)}" oninput="app.treeSearch(this.value)"><button class="btn outline small" onclick="app.fitTree()">⛶ إظهار الكل</button><button class="btn outline small" onclick="app.exportSVG()">↧ حفظ صورة SVG</button></div></div><div id="treeArea" class="tree-area ${treeStyle}"><div class="tree-world" id="treeWorld"><svg class="tree-lines" id="treeLines"></svg><div id="treeNodes"></div></div><div class="tree-controls"><button onclick="app.zoom(1.25)" aria-label="تقريب" title="تقريب">+</button><button onclick="app.zoom(.8)" aria-label="إبعاد" title="إبعاد">−</button><button onclick="app.fitTree()" aria-label="إظهار جميع الأفراد" title="إظهار الجميع">⌖</button></div><div class="tree-tip">${treeStyle==='botanical'?'الجذوع والأغصان للنسب · الوردي المتقطع للزواج · الأغصان البنية للنسب':'بطاقات الأسماء متصلة بخطوط النسب'} · اسحب لاستكشاف الشجرة وكبّر بإصبعين</div></div></section><p class="page-note">${people.some(p=>p.id.startsWith('sample-'))?'ℹ الأسماء الظاهرة أمثلة تجريبية. ابدأ شجرة فارغة من الإدارة عند الانتقال لبيانات عائلتك.':'ℹ اضغط على أي اسم للاطلاع على العلاقات وتعديلها.'}</p>`;
+ const mistakes=invalidCoupleLinks();
+ const errorBanner=mistakes.length?`<div class="warning" role="alert" style="margin:16px 0">⚠ تم اكتشاف ${mistakes.length} رابط زواج غير صحيح بين والد وابنه/ابنته. لن يُرسم الرابط الخاطئ. <button class="btn small outline" onclick="app.repairInvalidRelationships()">تصحيح الرابط بعد التأكيد</button></div>`:'';
+ content.innerHTML=hero()+errorBanner+`<section class="surface"><div class="surface-header"><h3>فروع العائلة</h3><div class="tools"><div class="tree-style-switch" role="group" aria-label="طريقة عرض شجرة العائلة"><button class="${treeStyle==='botanical'?'active':''}" aria-pressed="${treeStyle==='botanical'}" onclick="app.setTreeStyle('botanical')">🌳 شجرة بأوراق</button><button class="${treeStyle==='classic'?'active':''}" aria-pressed="${treeStyle==='classic'}" onclick="app.setTreeStyle('classic')">⑂ خطوط الأنساب</button></div><div class="tree-font-actions" aria-label="تكبير وتصغير الخط"><button title="تصغير الخط" onclick="app.adjustFont(-.15)">A−</button><span>${Math.round(treeTextScale*100)}٪</span><button title="تكبير الخط" onclick="app.adjustFont(.15)">A+</button></div><input class="field search" id="treeSearch" placeholder="🔎 ابحث عن اسم..." value="${esc(treeView.query)}" oninput="app.treeSearch(this.value)"><button class="btn outline small" onclick="app.fitTree()">⛶ إظهار الكل</button><button class="btn outline small" onclick="app.exportSVG()">↧ حفظ صورة SVG</button></div></div><div id="treeArea" class="tree-area ${treeStyle}"><div class="tree-world" id="treeWorld"><svg class="tree-lines" id="treeLines"></svg><div id="treeNodes"></div></div><div class="tree-controls"><button onclick="app.zoom(1.25)" aria-label="تقريب" title="تقريب">+</button><button onclick="app.zoom(.8)" aria-label="إبعاد" title="إبعاد">−</button><button onclick="app.fitTree()" aria-label="إظهار جميع الأفراد" title="إظهار الجميع">⌖</button></div><div class="tree-tip">${treeStyle==='botanical'?'الجذوع والأغصان للنسب · الوردي المتقطع للزواج · الأغصان البنية للنسب':'بطاقات الأسماء متصلة بخطوط النسب'} · اسحب لاستكشاف الشجرة وكبّر بإصبعين</div></div></section><p class="page-note">${people.some(p=>p.id.startsWith('sample-'))?'ℹ الأسماء الظاهرة أمثلة تجريبية. ابدأ شجرة فارغة من الإدارة عند الانتقال لبيانات عائلتك.':'ℹ اضغط على أي اسم للاطلاع على العلاقات وتعديلها.'}</p>`;
  treeView.layout=layoutPeople();const l=treeView.layout,$nodes=$('treeNodes'),$svg=$('treeLines');
  document.documentElement.style.setProperty('--tree-card-w',l.W+'px');document.documentElement.style.setProperty('--tree-card-h',l.H+'px');
  $nodes.style.width=l.totalW+'px';$nodes.style.height=l.totalH+'px';$svg.setAttribute('width',l.totalW);$svg.setAttribute('height',l.totalH);$svg.setAttribute('viewBox',`0 0 ${l.totalW} ${l.totalH}`);
@@ -373,10 +406,25 @@ function personForm(id=null){let isEdit=!!id,p=people.find(x=>x.id===id)||{name:
  let body=`<form id="personEdit" onsubmit="app.savePerson(event,'${esc(id||'')}')"><div class="form-grid"><div class="form-row wide"><label>الاسم الكامل *</label><input id="f_name" class="field" maxlength="120" required minlength="2" value="${esc(p.name)}" placeholder="اكتب الاسم"></div><div class="form-row"><label>الجنس</label><select id="f_gender" class="field"><option value="male" ${p.gender==='male'?'selected':''}>ذكر</option><option value="female" ${p.gender==='female'?'selected':''}>أنثى</option></select></div><div class="form-row"><label>المدينة أو المنطقة</label><input id="f_city" class="field" value="${esc(p.city)}" maxlength="150" placeholder="اختياري"></div><div class="form-row"><label>الأب</label>${selectPersons('father_id',p.father_id,'male')}</div><div class="form-row"><label>الأم</label>${selectPersons('mother_id',p.mother_id,'female')}</div><div class="form-row wide"><label>الزوج / الزوجة (اختياري)</label>${selectPersons('spouse',spouse,p.gender==='male'?'female':'male')}<div class="hint">يمكنك إضافة أكثر من زوج/زوجة لاحقًا من بطاقة الطرف الآخر.</div></div><div class="form-row"><label>سنة الميلاد</label><input id="f_birth_year" class="field" value="${esc(p.birth_year)}" maxlength="25" placeholder="مثل ١٤٠٠ هـ"></div><div class="form-row"><label>سنة الوفاة</label><input id="f_death_year" class="field" value="${esc(p.death_year)}" maxlength="25" placeholder="اختياري"></div><div class="form-row wide"><label>السيرة والذكريات</label><textarea id="f_bio" class="field" maxlength="4500" placeholder="نبذة أو قصة أو معلومات مفيدة...">${esc(p.bio)}</textarea></div><div class="form-row wide"><label>صورة شخصية (اختياري)</label><input id="f_image" type="file" accept="image/*" class="field"><div class="hint">تُصغّر الصورة تلقائيًا حفاظًا على مساحة التخزين. راعِ موافقة أصحاب الصور قبل المشاركة.</div></div></div><div class="modal-footer" style="padding:17px 0 0;margin-top:17px"><button type="button" class="btn outline" onclick="app.closeModal()">إلغاء</button><button type="submit" class="btn">${isEdit?'حفظ التعديلات':'إضافة إلى الشجرة'}</button></div></form>`;modal(isEdit?'تعديل بيانات الشخص':'إضافة شخص جديد',body,'',true)}
 function readImage(file,max=160){return new Promise((resolve,reject)=>{if(!file)return resolve(null);if(!file.type.startsWith('image/'))return reject(new Error('يُقبل ملف صورة فقط'));if(file.size>12*1024*1024)return reject(new Error('الصورة أكبر من ١٢ ميجابايت'));let image=new Image();let reader=new FileReader();reader.onload=()=>{image.onload=()=>{let ratio=Math.min(1,max/image.width,max/image.height),c=document.createElement('canvas');c.width=Math.max(1,Math.round(image.width*ratio));c.height=Math.max(1,Math.round(image.height*ratio));c.getContext('2d').drawImage(image,0,0,c.width,c.height);resolve(c.toDataURL('image/jpeg',.72))};image.onerror=()=>reject(new Error('الصورة غير صالحة'));image.src=reader.result};reader.onerror=()=>reject(new Error('تعذر قراءة الصورة'));reader.readAsDataURL(file)})}
 async function savePerson(ev,id){ev.preventDefault();let f=k=>$('f_'+k)?.value?.trim()||'',name=f('name'),father_id=f('father_id')||null,mother_id=f('mother_id')||null,spouse=f('spouse')||null;if(name.length<2)return toast('الاسم يجب ألا يقل عن حرفين',true);if(father_id===id||mother_id===id||spouse===id)return toast('لا يمكن جعل الشخص قريبًا لنفسه',true);
- const old=people.find(x=>x.id===id),newId=id||uid(),spouse_ids=Array.from(new Set([...(old?.spouse_ids||[]),...(spouse?[spouse]:[])]));if(old?.spouse_ids?.length&&spouse&&old.spouse_ids[0]!==spouse)spouse_ids.splice(spouse_ids.indexOf(old.spouse_ids[0]),1);
+ const old=people.find(x=>x.id===id),newId=id||uid(),previousSpouses=old?.spouse_ids||[],spouse_ids=Array.from(new Set([...(previousSpouses.length?previousSpouses.slice(1):[]),...(spouse?[spouse]:[])]));
+ const proposed={id:newId,name,gender:f('gender'),father_id,mother_id,spouse_ids};
+ const viewById=Object.fromEntries(people.map(p=>[p.id,p]));viewById[newId]=proposed;
+ for(const sid of spouse_ids){const other=viewById[sid];if(other&&isParentChildPair(proposed,other))return toast('خطأ في العلاقة: لا يمكن تسجيل الأب أو الأم أو الابن أو البنت كزوج/زوجة',true)}
+ for(const other of people){if((other.spouse_ids||[]).includes(newId)&&isParentChildPair(proposed,other))return toast('يوجد رابط زواج غير صحيح بين هذا الشخص وأحد والديه أو أبنائه. صحح العلاقة أولًا.',true)}
  const data={id:newId,name,gender:f('gender'),father_id,mother_id,spouse_ids,birth_year:f('birth_year'),death_year:f('death_year'),city:f('city'),bio:f('bio'),image:old?.image||'',updated_at:new Date().toISOString()};
  try{let input=$('f_image')?.files?.[0];if(input)data.image=await readImage(input,180);const all=people.map(x=>x.id===newId?data:x).concat(old?[]:[data]);function cycle(start,target,seen=new Set){if(!start)return false;if(start===target)return true;if(seen.has(start))return false;seen.add(start);let x=all.find(p=>p.id===start);return x&&(cycle(x.father_id,target,seen)||cycle(x.mother_id,target,seen))}if(cycle(father_id,newId)||cycle(mother_id,newId))throw Error('هذه العلاقة تُنشئ دورة غير صحيحة في سلسلة الأنساب');
- if(mode==='cloud'){await writePerson({...data,family_id:family.id,created_by:old?.created_by||session.user.id});if(spouse){let other=people.find(x=>x.id===spouse);if(other)await writePerson({...other,spouse_ids:Array.from(new Set([...(other.spouse_ids||[]),newId]))})}await reloadCloud()}else{if(old)people=people.map(x=>x.id===id?{...old,...data}:x);else people.push({...data,created_at:new Date().toISOString()});if(spouse){let other=people.find(x=>x.id===spouse);if(other)other.spouse_ids=Array.from(new Set([...(other.spouse_ids||[]),newId]))}saveLocal()}
+ const peerUpdates=people.filter(x=>x.id!==newId&&((x.spouse_ids||[]).includes(newId)||spouse_ids.includes(x.id))).map(x=>({
+  ...x,spouse_ids:spouse_ids.includes(x.id)?Array.from(new Set([...(x.spouse_ids||[]),newId])):(x.spouse_ids||[]).filter(z=>z!==newId)
+ }));
+ if(mode==='cloud'){
+  await writePerson({...data,family_id:family.id,created_by:old?.created_by||session.user.id});
+  for(const peer of peerUpdates)await writePerson(peer);
+  await reloadCloud()
+ }else{
+  if(old)people=people.map(x=>x.id===id?{...old,...data}:x);else people.push({...data,created_at:new Date().toISOString()});
+  const peers=Object.fromEntries(peerUpdates.map(x=>[x.id,x]));people=people.map(x=>peers[x.id]||x);
+  saveLocal()
+ }
  closeModal();treeView.fit=false;render();toast(old?'تم تحديث بيانات الشخص':'أُضيف الاسم إلى شجرة العائلة');
  }catch(e){toast(e.message||'تعذر حفظ البيانات',true)}}
 function modal(title,body,footer='',large=false){$('modalRoot').innerHTML=`<div class="modal-wrap" onclick="if(event.target===this)app.closeModal()"><div class="modal ${large?'large':''}"><header class="modal-header"><h2>${title}</h2><button class="close" onclick="app.closeModal()">×</button></header><div class="modal-body">${body}</div>${footer?`<footer class="modal-footer">${footer}</footer>`:''}</div></div>`}
@@ -390,7 +438,19 @@ function renderAdmin(){let shared=mode==='cloud'&&family&&membership?.status==='
 async function renameFamily(){let name=$('renameFamily')?.value.trim();if(!name||name.length<2||name.length>100)return toast('أدخل اسمًا صحيحًا للعائلة',true);try{if(mode==='cloud'){if(!isAdmin())throw Error('يجب أن تكون مدير العائلة');let{error}=await sb.from('family_trees').update({name}).eq('id',family.id);if(error)throw error;family.name=name}else{local.name=name;saveLocal()}render();toast('تم تحديث اسم العائلة')}catch(e){toast(e.message,true)}}
 function exportJSON(){let data={format:'jozorna-family-tree',version:1,exported_at:new Date().toISOString(),name:family?.name||local.name,people,posts};download(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}),'jozorna-backup-'+new Date().toISOString().slice(0,10)+'.json');toast('تم تجهيز ملف النسخة الاحتياطية')}
 function download(blob,name){let url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)}
-async function importJSON(file){if(!file)return;try{let data=JSON.parse(await file.text());if(data.format!=='jozorna-family-tree'||!Array.isArray(data.people)||!Array.isArray(data.posts))throw Error('الملف ليس نسخة صحيحة من برنامج جذورنا');if(data.people.length>2000)throw Error('النسخة تحتوي عددًا أكبر من الحد المسموح (٢٠٠٠ شخص)');if(data.people.some(p=>!isValidId(p.id)||!['male','female'].includes(p.gender)||typeof p.name!=='string'))throw Error('بيانات الأشخاص غير صالحة');if(data.posts.some(p=>!isValidId(p.id)||!['message','memory'].includes(p.type)))throw Error('بيانات المشاركات غير صالحة');if(!confirm('سيُستبدل محتوى النسخة المحلية فقط. هل تريد الاستمرار؟'))return;local={name:String(data.name||'عائلتي').slice(0,100),people:data.people,posts:data.posts,settings:{}};localStorage.setItem(LS,JSON.stringify(local));if(mode==='local'){people=clone(local.people);posts=clone(local.posts);treeView.fit=false;render()}toast('تم استيراد النسخة المحلية')}catch(e){toast('تعذر الاستيراد: '+e.message,true)}}
+async function importJSON(file){if(!file)return;try{let data=JSON.parse(await file.text());if(data.format!=='jozorna-family-tree'||!Array.isArray(data.people)||!Array.isArray(data.posts))throw Error('الملف ليس نسخة صحيحة من برنامج جذورنا');if(data.people.length>2000)throw Error('النسخة تحتوي عددًا أكبر من الحد المسموح (٢٠٠٠ شخص)');if(data.people.some(p=>!isValidId(p.id)||!['male','female'].includes(p.gender)||typeof p.name!=='string'))throw Error('بيانات الأشخاص غير صالحة');if(data.posts.some(p=>!isValidId(p.id)||!['message','memory'].includes(p.type)))throw Error('بيانات المشاركات غير صالحة');if(invalidCoupleLinks(data.people).length)throw Error('تحتوي النسخة على زواج مسجل بين والد وابنه/ابنته. صحح العلاقات أولًا قبل الاستيراد');if(!confirm('سيُستبدل محتوى النسخة المحلية فقط. هل تريد الاستمرار؟'))return;local={name:String(data.name||'عائلتي').slice(0,100),people:data.people,posts:data.posts,settings:{}};localStorage.setItem(LS,JSON.stringify(local));if(mode==='local'){people=clone(local.people);posts=clone(local.posts);treeView.fit=false;render()}toast('تم استيراد النسخة المحلية')}catch(e){toast('تعذر الاستيراد: '+e.message,true)}}
+async function repairInvalidRelationships(){
+ const invalid=invalidCoupleLinks();if(!invalid.length)return toast('لا توجد روابط زواج متعارضة مع الأبوة أو الأمومة');
+ if(!isAdmin())return toast('تصحيح العلاقات متاح لمدير العائلة',true);
+ if(!confirm('تم اكتشاف روابط زواج بين والد وابنه/ابنته. سيُحذف هذا الرابط غير الصحيح فقط مع الاحتفاظ بباقي بيانات الأشخاص. يُنصح بتنزيل نسخة احتياطية قبل المتابعة. هل تريد الإصلاح؟'))return;
+ const forbidden=new Set(invalid.map(({a,b})=>[a.id,b.id].sort().join('|')));
+ const changed=people.filter(p=>(p.spouse_ids||[]).some(sid=>forbidden.has([p.id,sid].sort().join('|')))).map(p=>({...p,spouse_ids:(p.spouse_ids||[]).filter(sid=>!forbidden.has([p.id,sid].sort().join('|')))}));
+ try{
+  if(mode==='cloud'){for(const p of changed)await writePerson(p);await reloadCloud()}
+  else{const patches=Object.fromEntries(changed.map(p=>[p.id,p]));people=people.map(p=>patches[p.id]||p);saveLocal()}
+  treeView.fit=false;render();toast('تم تصحيح رابط الزواج الخاطئ مع الحفاظ على بقية علاقات النسب');
+ }catch(e){toast('تعذر تصحيح العلاقات: '+e.message,true)}
+}
 function isValidId(id){return typeof id==='string'&&/^[\w-]{1,100}$/.test(id)}
 function resetTree(){if(!confirm('سيتم حذف بيانات الشجرة المحلية والمشاركات من هذا الجهاز. لا يمكن التراجع دون نسخة احتياطية. هل تؤكد؟'))return;local={name:'شجرة عائلتي',people:[],posts:[],settings:{}};people=[];posts=[];saveLocal();treeView.fit=false;render();toast('أصبحت الشجرة فارغة وجاهزة للبناء')}
 function copyCode(){if(!family?.invite_code)return;const copy=navigator.clipboard?.writeText(family.invite_code);if(copy)copy.then(()=>toast('نُسخ رمز الدعوة')).catch(()=>toast('انسخ الرمز من الحقل'));else toast('انسخ الرمز من الحقل')}
@@ -418,7 +478,7 @@ function localMode(){mode='local';family=null;membership=null;people=clone(local
 async function uploadLocal(){if(!isAdmin())return toast('الرفع متاح لمدير الشجرة فقط',true);let copy=local.people||[];if(!copy.length)return toast('لا توجد أسماء محلية للنقل');if(!confirm(`سيُرفع ${copy.length} اسمًا من الجهاز إلى شجرة العائلة المشتركة. قد تكون بينها أسماء تجريبية؛ تأكد قبل المتابعة. هل توافق؟`))return;try{let existing=new Set(people.map(p=>p.id));for(const p of copy){if(!isValidId(p.id))continue;if(existing.has(p.id))continue;await writePerson({...p,id:p.id})}for(const p of local.posts||[]){if(!isValidId(p.id)||posts.some(x=>x.id===p.id))continue;let{error}=await sb.from('family_posts').insert({id:p.id,family_id:family.id,type:p.type||'message',body:p.body,image:p.image||'',person_id:p.person_id||null,memory_date:p.memory_date||'',author_name:currentName(),author_id:session.user.id});if(error)throw error}await reloadCloud();treeView.fit=false;render();toast('اكتمل نقل البيانات غير المكررة')}catch(e){toast('توقف النقل: '+e.message,true)}}
 function goto(tab){currentTab=tab;treeView.query='';if(tab==='tree')treeView.fit=false;closeModal();render();window.scrollTo({top:0,behavior:'instant'})}
 function switchMode(){if(mode==='local')cloudSettings();else{modal('حساب المزامنة',`<p>أنت متصل بشجرة العائلة. يمكنك تسجيل الخروج أو الانتقال إلى بيانات الجهاز المحلية.</p>`,`<button class="btn outline" onclick="app.localMode();app.closeModal()">نسخة الجهاز</button><button class="btn" onclick="app.closeModal();app.goto('admin')">إدارة الحساب</button>`)}}
-window.app={goto,profile,personForm,closeModal,savePerson,deletePerson,renameFamily,treeSearch,fitTree,changeFont,adjustFont,fontSettings,setTreeStyle,zoom:f=>zoomTree(f),filterGender:s=>{listFilter=s;renderPeople()},filterName:s=>{treeView.query=s;renderPeople()},exportSVG:svgExport,publish,deletePost,exportJSON,importJSON,resetTree,cloudSettings,connectCloud,loginTab:s=>{loginTab=s;renderAccount()},authSubmit,showCreate,showJoin,createFamily,joinFamily,checkMembership,approve,reject,logout,localMode,uploadLocal,copyCode,switchMode};
+window.app={repairInvalidRelationships,goto,profile,personForm,closeModal,savePerson,deletePerson,renameFamily,treeSearch,fitTree,changeFont,adjustFont,fontSettings,setTreeStyle,zoom:f=>zoomTree(f),filterGender:s=>{listFilter=s;renderPeople()},filterName:s=>{treeView.query=s;renderPeople()},exportSVG:svgExport,publish,deletePost,exportJSON,importJSON,resetTree,cloudSettings,connectCloud,loginTab:s=>{loginTab=s;renderAccount()},authSubmit,showCreate,showJoin,createFamily,joinFamily,checkMembership,approve,reject,logout,localMode,uploadLocal,copyCode,switchMode};
 $('topAccount').addEventListener('click',switchMode);
 window.addEventListener('focus',()=>{if(mode==='cloud'&&session)refreshBackground()});
 // النسخة المحلية تعمل فورًا، دون تسجيل أو خدمات خارجية.
