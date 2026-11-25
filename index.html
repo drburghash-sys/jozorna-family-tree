@@ -202,38 +202,60 @@ function layoutPeople(){
  };
  const memberOrder={};for(const id of unitIds)memberOrder[id]=sortMembers(id);
  const ownWidth=uid=>memberOrder[uid].length*W+Math.max(0,memberOrder[uid].length-1)*marriedGap;
+ // Secondary ancestors must be budgeted into their child's family footprint.
+ // This prevents the previously separate ancestral root from being forced
+ // across unrelated households as a long vine.
+ const satelliteOf={};
+ const attachedTo={};
+ for(const uid of unitIds)for(const alt of otherParents[uid]){
+  if(primary[alt]||childrenOf[alt].length||units[alt].length!==1||satelliteOf[alt])continue;
+  (attachedTo[uid]??=[]).push(alt);satelliteOf[alt]=uid;
+ }
+ const satelliteGap=Math.max(55,Math.round(76*treeTextScale));
+ const satelliteWidths=uid=>(attachedTo[uid]||[]).reduce((n,id)=>n+ownWidth(id)+satelliteGap,0);
  const sizes={};
  function measure(uid,ancestors=new Set()){
   if(sizes[uid]!==undefined)return sizes[uid];
-  if(ancestors.has(uid))return ownWidth(uid);
+  if(ancestors.has(uid))return ownWidth(uid)+satelliteWidths(uid);
   ancestors.add(uid);
   const kids=childrenOf[uid];
   const kidsWidth=kids.length?kids.reduce((sum,k)=>sum+measure(k,new Set(ancestors)),0)+(kids.length-1)*siblingGap:0;
-  return sizes[uid]=Math.max(ownWidth(uid),kidsWidth);
+  return sizes[uid]=Math.max(ownWidth(uid)+satelliteWidths(uid),kidsWidth);
  }
  for(const id of unitIds)measure(id);
- const roots=unitIds.filter(uid=>!primary[uid]);
+ const roots=unitIds.filter(uid=>!primary[uid]&&!satelliteOf[uid]);
  const rootSort=(a,b)=>{
   const ad=Math.min(...units[a].map(p=>depthMemo[p.id]||0));
   const bd=Math.min(...units[b].map(p=>depthMemo[p.id]||0));
   return ad-bd||a.localeCompare(b);
  };
  roots.sort(rootSort);
- // Keep an affinal root close to the lineage whose descendant married it.
+ // Tree roots that link through marriages remain adjacent; no person is duplicated.
  const rootConnections={};for(const id of roots)rootConnections[id]=new Set();
  const rootOf=uid=>{let guard=new Set(),v=uid;while(primary[v]&&!guard.has(v)){guard.add(v);v=primary[v]}return v};
  for(const uid of unitIds)for(const alt of otherParents[uid]){let a=rootOf(uid),b=rootOf(alt);if(a!==b&&rootConnections[a]&&rootConnections[b]){rootConnections[a].add(b);rootConnections[b].add(a)}}
  const ordered=[],visitedRoots=new Set();
  function walkRoots(r){if(visitedRoots.has(r))return;visitedRoots.add(r);ordered.push(r);for(const other of [...rootConnections[r]].sort())walkRoots(other)}
  for(const r of roots)walkRoots(r);
- const loc={},unitCenters={},unitOrigins={},placed=new Set();let maxLevel=0,nextX=75;
+ const loc={},unitCenters={},unitOrigins={},placed=new Set();let maxLevel=0,minLevel=0,nextX=75;
  function place(uid,level,left){
-  if(placed.has(uid))return;placed.add(uid);maxLevel=Math.max(level,maxLevel);
-  const size=sizes[uid],own=ownWidth(uid),start=left+(size-own)/2;
+  if(placed.has(uid))return;placed.add(uid);maxLevel=Math.max(level,maxLevel);minLevel=Math.min(level,minLevel);
+  const size=sizes[uid],own=ownWidth(uid),satellites=attachedTo[uid]||[],extra=satelliteWidths(uid);
+  // Satellites occupy reserved space to the right of the primary family.
+  const rowWidth=own+extra, start=left+(size-rowWidth)/2;
   memberOrder[uid].forEach((p,i)=>loc[p.id]={x:start+i*(W+marriedGap),y:60+level*VG,level,unit:uid});
   const center=start+own/2;
   unitCenters[uid]={x:center,y:60+level*VG,level};
   unitOrigins[uid]={x:start,y:60+level*VG,width:own};
+  let curSat=start+own+satelliteGap;
+  for(const sid of satellites){
+   const ownSat=ownWidth(sid),satLevel=level-1;
+   memberOrder[sid].forEach((p,i)=>loc[p.id]={x:curSat+i*(W+marriedGap),y:60+satLevel*VG,level:satLevel,unit:sid});
+   unitCenters[sid]={x:curSat+ownSat/2,y:60+satLevel*VG,level:satLevel};
+   unitOrigins[sid]={x:curSat,y:60+satLevel*VG,width:ownSat};
+   placed.add(sid);minLevel=Math.min(minLevel,satLevel);
+   curSat+=ownSat+satelliteGap;
+  }
   const kids=childrenOf[uid];
   if(kids.length){const width=kids.reduce((s,k)=>s+sizes[k],0)+(kids.length-1)*siblingGap;
    let cur=left+(size-width)/2;
@@ -242,39 +264,31 @@ function layoutPeople(){
  }
  for(const root of ordered){if(placed.has(root))continue;place(root,0,nextX);nextX+=sizes[root]+forestGap}
  for(const uid of unitIds)if(!placed.has(uid)){place(uid,0,nextX);nextX+=sizes[uid]+forestGap}
+ // Move a satellite ancestor next to their actual biological child, without
+ // touching a grandparents' leaf in the same generation. This second pass
+ // resolves overlap caused by two ancestry paths sharing a generation.
+ for(const [sid,uid] of Object.entries(satelliteOf)){
+  const members=units[sid],child=units[uid].find(c=>members.some(parent=>[c.father_id,c.mother_id].includes(parent.id)));
+  if(!child||!loc[child.id])continue;
+  const member=members[0],point=loc[member.id],g=point.level,near=loc[child.id].x;
+  const step=W+Math.max(18,Math.round(32*treeTextScale));
+  const candidates=[near];for(let k=1;k<20;k++){candidates.push(near-k*step,near+k*step)}
+  const available=x=>x>=50&&Object.entries(loc).every(([pid,z])=>pid===member.id||z.level!==g||x+W+20<=z.x||z.x+W+20<=x);
+  const option=candidates.find(available);
+  if(option!=null){point.x=option;unitCenters[sid].x=option+W/2;unitOrigins[sid].x=option}
+ }
+ // Normalize generations so every ancestor remains visible within the canvas.
+ for(const z of Object.values(loc)){z.level-=minLevel;z.y=60+z.level*VG}
+ for(const z of Object.values(unitCenters)){z.level-=minLevel;z.y=60+z.level*VG}
+ for(const z of Object.values(unitOrigins)){z.y-=minLevel*VG}
+ maxLevel-=minLevel;
  if(treeStyle==='botanical'){
   for(const v of Object.values(loc))v.y=60+(maxLevel-v.level)*VG;
   for(const v of Object.values(unitCenters))v.y=60+(maxLevel-v.level)*VG;
   for(const v of Object.values(unitOrigins))v.y=60+(maxLevel-(v.y-60)/VG)*VG;
  }
- // Position independent ancestral roots near their biological child rather
- // than leaving a long vine crossing unrelated households.
- const usedSatellites=new Set();
- for(const targetUid of unitIds){
-  for(const altUid of otherParents[targetUid]){
-   if(usedSatellites.has(altUid) || !roots.includes(altUid))continue;
-   if(units[altUid].length!==1 || childrenOf[altUid].length)continue;
-   const parent=units[altUid][0];
-   const child=units[targetUid].find(c=>[c.father_id,c.mother_id].includes(parent.id));
-   if(!child||!loc[child.id]||!loc[parent.id])continue;
-   const point=loc[child.id],base=loc[parent.id];
-   const generationY=base.y;
-   const candidates=[];
-   for(let d=1;d<=6;d++){
-    candidates.push(point.x-(W+marriedGap)*d);
-    candidates.push(point.x+(W+marriedGap)*d);
-   }
-   function isFree(x){if(x<55)return false;return Object.entries(loc).every(([id,z])=>id===parent.id || Math.abs(z.y-generationY)>H*.78 || z.x+W+30<=x || x+W+30<=z.x)}
-   let choice=candidates.find(isFree);
-   if(choice==null)continue;
-   base.x=choice;
-   unitCenters[altUid].x=choice+W/2;
-   unitOrigins[altUid].x=choice;
-   usedSatellites.add(altUid);
-  }
- }
  const totalW=Math.max(750,nextX+40,...Object.values(loc).map(z=>z.x+W+65)),totalH=Math.max(560,(maxLevel+1)*VG+H+(treeStyle==='botanical'?190:90));
- return {byId,loc,unitOf,units,unitIds,memberOrder,unitCenters,unitOrigins,childrenOf,primary,otherParents,spouseLinks:[...spouseLinks.values()],W,H,totalW,totalH,roots,maxLevel,depthMemo};
+ return {byId,loc,unitOf,units,unitIds,memberOrder,unitCenters,unitOrigins,childrenOf,primary,otherParents,spouseLinks:[...spouseLinks.values()],W,H,totalW,totalH,roots:[...roots,...Object.keys(satelliteOf)],maxLevel,depthMemo};
 }
 function treeEdges(l){
  const edges=[];
@@ -285,8 +299,10 @@ function treeEdges(l){
  for(const uid of l.unitIds){const pu=l.primary[uid];if(!pu)continue;
   const parents=l.units[pu].filter(p=>l.units[uid].some(child=>[child.father_id,child.mother_id].includes(p.id)));
   const from=parents.length?parents.map(p=>l.loc[p.id].x+l.W/2).reduce((a,b)=>a+b,0)/parents.length:l.unitCenters[pu].x;
+  const naturalChildren=l.units[uid].filter(child=>child.father_id&&l.unitOf[child.father_id]===pu || child.mother_id&&l.unitOf[child.mother_id]===pu);
+  const toX=naturalChildren.length?naturalChildren.map(p=>l.loc[p.id].x+l.W/2).reduce((a,b)=>a+b,0)/naturalChildren.length:l.unitCenters[uid].x;
   const to=l.unitCenters[uid];
-  if(to)edges.push({type:'branch',from:{x:from,y:l.unitCenters[pu].y},to});
+  if(to)edges.push({type:'branch',from:{x:from,y:l.unitCenters[pu].y},to:{x:toX,y:to.y}});
  }
  // Distinct known ancestry on the other partner is shown as a subtle vine,
  // never as a dotted spouse line. One person is never duplicated.
